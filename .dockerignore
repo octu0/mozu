@@ -1,0 +1,10 @@
+.build
+.git
+.gitignore
+.gemini
+.tmp
+Tests
+script/dataset
+*.wav
+*.py
+*.sh
