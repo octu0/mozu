@@ -36,7 +36,7 @@ public final class TextNormalizer: Sendable {
         let nfcText = text.precomposedStringWithCanonicalMapping
         let laughCleaned = removeLaughAnnotations(nfcText)
         let prolongedNormalized = normalizeProlongedMarks(laughCleaned)
-        return prolongedNormalized
+        return EnglishReading.normalizeLatin(prolongedNormalized)
     }
 
     /// 括弧内の笑い注記等を除去する

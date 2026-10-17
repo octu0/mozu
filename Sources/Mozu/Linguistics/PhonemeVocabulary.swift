@@ -404,6 +404,22 @@ public struct PhonemeVocabulary: Sendable {
                 case "ふぃ": phonemes.append(contentsOf: ["h", "i"])
                 case "ふぇ": phonemes.append(contentsOf: ["h", "e"])
                 case "ふぉ": phonemes.append(contentsOf: ["h", "o"])
+                case "ふゅ": phonemes.append(contentsOf: ["hy", "u"])
+                // 外来語の拍（ティ、ディ、ウィ など）。2 拍に分けず 1 拍として読む
+                case "てぃ": phonemes.append(contentsOf: ["t", "i"])
+                case "でぃ": phonemes.append(contentsOf: ["d", "i"])
+                case "とぅ": phonemes.append(contentsOf: ["t", "u"])
+                case "どぅ": phonemes.append(contentsOf: ["d", "u"])
+                case "てゅ": phonemes.append(contentsOf: ["ch", "u"])
+                case "でゅ": phonemes.append(contentsOf: ["j", "u"])
+                case "うぃ": phonemes.append(contentsOf: ["w", "i"])
+                case "うぇ": phonemes.append(contentsOf: ["w", "e"])
+                case "うぉ": phonemes.append(contentsOf: ["w", "o"])
+                case "いぇ": phonemes.append(contentsOf: ["y", "e"])
+                case "ゔぁ": phonemes.append(contentsOf: ["b", "a"])
+                case "ゔぃ": phonemes.append(contentsOf: ["b", "i"])
+                case "ゔぇ": phonemes.append(contentsOf: ["b", "e"])
+                case "ゔぉ": phonemes.append(contentsOf: ["b", "o"])
                 default:
                     matched = false
                 }
@@ -421,6 +437,7 @@ public struct PhonemeVocabulary: Sendable {
             case "う", "ぅ": phonemes.append("u")
             case "え", "ぇ": phonemes.append("e")
             case "お", "ぉ": phonemes.append("o")
+            case "ゔ": phonemes.append(contentsOf: ["b", "u"])
             case "か": phonemes.append(contentsOf: ["k", "a"])
             case "き": phonemes.append(contentsOf: ["k", "i"])
             case "く": phonemes.append(contentsOf: ["k", "u"])

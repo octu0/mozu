@@ -23,11 +23,16 @@ public final class Vocoder: @unchecked Sendable {
 
     /// mel: [frames][melChannels] → PCM（frames · hop サンプル）
     public func synthesize(mel: [[Float]]) -> [Float] {
-        let cfg = weights.config
-        let frames = mel.count
-        if frames == 0 {
+        if mel.isEmpty {
             return []
         }
+        return Self.inverseSTFT(head: head(mel: mel), frames: mel.count, config: weights.config, cosBasis: cosBasis, sinBasis: sinBasis, window: window)
+    }
+
+    /// mel: [frames][melChannels] → ヘッド出力 [frames, 2·bins]（対数振幅, 位相）
+    public func head(mel: [[Float]]) -> [Float] {
+        let cfg = weights.config
+        let frames = mel.count
         let d = cfg.modelDim
         let melDim = cfg.melChannels
         var melFlat = [Float](repeating: 0.0, count: frames * melDim)
@@ -77,7 +82,7 @@ public final class Vocoder: @unchecked Sendable {
             t += 1
         }
         Gemm.multiply(normed, weights.headProjection.values, &head, m: frames, n: headDim, k: d, beta: 1.0)
-        return Self.inverseSTFT(head: head, frames: frames, config: cfg, cosBasis: cosBasis, sinBasis: sinBasis, window: window)
+        return head
     }
 
     /// ヘッド出力 [frames, 2·bins]（対数振幅, 位相）→ 波形

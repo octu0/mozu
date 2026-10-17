@@ -150,4 +150,14 @@ final class LinguisticTests: XCTestCase {
         XCTAssertTrue(vocabulary.isVoiced(symbol: "hy") != true, "hy は無声音であること")
     }
 
+    // MARK: - 7. 転写からの語彙獲得
+
+    func testLexiconLearningAcquiresKatakanaWords() {
+        let result = ViterbiMorphology.learnLexiconEntries(sentences: ["コップに水を入れる。", "ア、そう。"], existing: [])
+        let surfaces = Set(result.lexicon.filter { $0.cost == ViterbiMorphology.learnedLexiconCost }.map { $0.surface })
+        XCTAssertTrue(surfaces.contains("コップ"), "2 文字以上のカタカナ語を獲得すること")
+        XCTAssertEqual(result.lexicon.first { $0.surface == "コップ" }?.reading, "こっぷ")
+        XCTAssertTrue(surfaces.contains("水"), "漢字語も従来どおり獲得すること")
+        XCTAssertTrue(surfaces.contains("ア") != true, "1 文字のカタカナは獲得しないこと")
+    }
 }

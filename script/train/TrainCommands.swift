@@ -82,7 +82,11 @@ enum TrainCommands {
             print("重みを読み込みました: \(path)（語彙 \(weights.lexicon.count) 件、パラメータ \(weights.parameterCount)）")
         }
         let sentences = corpora.flatMap { $0.utterances.map { $0.text } }
-        let learned = ViterbiMorphology.learnLexiconEntries(sentences: sentences, existing: weights.lexicon)
+        var readings: [String: String] = [:]
+        for corpus in corpora {
+            readings.merge(corpus.readings) { first, _ in first }
+        }
+        let learned = ViterbiMorphology.learnLexiconEntries(sentences: sentences, existing: weights.lexicon, readings: readings)
         if 0 < learned.added {
             weights.lexicon = learned.lexicon
             print("転写 \(learned.sentenceCount) 文から語彙を \(learned.added) 件獲得しました（語彙合計 \(weights.lexicon.count) 件）。")

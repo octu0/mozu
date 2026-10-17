@@ -46,7 +46,8 @@ var targets: [Target] = [
 ]
 
 // 手元の計測用スクリプト（script/probe/main.swift、リポジトリには含めない）があるときだけ probe ターゲットを追加する
-if FileManager.default.fileExists(atPath: "script/probe/main.swift") {
+let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+if FileManager.default.fileExists(atPath: packageDirectory.appendingPathComponent("script/probe/main.swift").path) {
     products.append(.executable(name: "probe", targets: ["probe"]))
     targets.append(.executableTarget(name: "probe", dependencies: ["Mozu"] + mlxProducts, path: "script/probe"))
 }

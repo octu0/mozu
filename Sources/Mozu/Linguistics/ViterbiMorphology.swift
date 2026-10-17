@@ -227,13 +227,17 @@ public final class ViterbiMorphology: Sendable {
     /// 獲得した語彙はソースコードではなくモデル重み（MozuWeights.lexicon）に永続化される。
     ///
     /// 規則:
-    /// - 漢字または「々」を含む語のみ獲得する（かな語は既存語彙と未知語処理に任せ、助詞の読みを保護する）
+    /// - 漢字または「々」を含む語と、2 文字以上のカタカナ語・英字の語を獲得する（ひらがな語は既存語彙と未知語処理に任せ、助詞の読みを保護する）
+    ///   カタカナ語・英字の語も獲得するのは、語彙に無い語にはアクセント学習の結果を記録できず、平板のままになるため
+    /// - 英字の語の読みは綴りの規則による推定（EnglishReading.bestGuess）
+    /// - readings（コーパスが与える表記 → 読み）にある語はその読みを使い、獲得済みの語の読みも置き換える
     /// - 連続する漢字含有語の連結（複合語）も獲得し、Viterbi で最長一致が優先されるようにする
     /// - 同一表記に複数の読みがある場合は出現頻度の高い読みを採用する
     /// - 既存語彙および基本語彙に同一表記（同一品詞）がある場合は上書きしない
     public static func learnLexiconEntries(
         sentences: [String],
-        existing: [LexiconEntry]
+        existing: [LexiconEntry],
+        readings: [String: String] = [:]
     ) -> LexiconLearningResult {
         // 既存語彙が空の場合は基本語彙（助詞・助動詞など）を土台にする。
         // 獲得語彙だけの語彙リストを作ると、は→わ などの手書き読みが失われるため。
@@ -245,8 +249,10 @@ public final class ViterbiMorphology: Sendable {
         for entry in baseList {
             reserved.insert(entry.surface.precomposedStringWithCanonicalMapping)
         }
+        var reservedFallback = Set<String>()
         for entry in buildFallbackLexicon() {
             reserved.insert(entry.surface.precomposedStringWithCanonicalMapping)
+            reservedFallback.insert(entry.surface.precomposedStringWithCanonicalMapping)
         }
 
         var readingCounts: [String: [String: Int]] = [:]
@@ -258,6 +264,22 @@ public final class ViterbiMorphology: Sendable {
                 }
             }
             return false
+        }
+
+        func isKatakanaWord(_ s: String) -> Bool {
+            if s.count < 2 {
+                return false
+            }
+            for ch in s {
+                if isKatakanaOrProlonged(ch) != true || ch == "・" {
+                    return false
+                }
+            }
+            return true
+        }
+
+        func isLatinWord(_ s: String) -> Bool {
+            return 2 <= s.count && s.allSatisfy { EnglishReading.isLatinLetter($0) }
         }
 
         func isHiraganaReading(_ s: String) -> Bool {
@@ -281,7 +303,7 @@ public final class ViterbiMorphology: Sendable {
             if reserved.contains(normSurface) {
                 return
             }
-            if containsKanji(normSurface) != true {
+            if containsKanji(normSurface) != true && isKatakanaWord(normSurface) != true && isLatinWord(normSurface) != true {
                 return
             }
             if isHiraganaReading(normReading) != true {
@@ -294,6 +316,12 @@ public final class ViterbiMorphology: Sendable {
 
         var sentenceCount = 0
         for sentence in sentences {
+            // 英字の語は合成時と同じ正規化（全角→半角、語間の空白を詰める）をしてから取り出す
+            for word in EnglishReading.latinRuns(in: EnglishReading.normalizeLatin(sentence.precomposedStringWithCanonicalMapping)) {
+                if readings[word] == nil {
+                    record(surface: word, reading: EnglishReading.bestGuess(word))
+                }
+            }
             let tokens = transcribeSentenceTokens(sentence)
             if tokens.isEmpty {
                 continue
@@ -327,6 +355,9 @@ public final class ViterbiMorphology: Sendable {
                     runReading += tok.reading
                     runLength += 1
                 } else {
+                    if isKatakanaWord(tok.surface) {
+                        record(surface: tok.surface, reading: katakanaToHiragana(tok.surface))
+                    }
                     if 1 < runLength {
                         record(surface: runSurface, reading: runReading)
                     }
@@ -343,6 +374,31 @@ public final class ViterbiMorphology: Sendable {
 
         var merged = baseList
         var added = 0
+        // コーパスが与える読み: 獲得済みの語は読みを置き換え（読みが変われば核は未知に戻す）、無い語は追加する
+        var given: [String: String] = [:]
+        for (surface, reading) in readings {
+            let normSurface = EnglishReading.normalizeLatin(surface.precomposedStringWithCanonicalMapping)
+            let normReading = katakanaToHiragana(reading.precomposedStringWithCanonicalMapping)
+            if isHiraganaReading(normReading) && reservedFallback.contains(normSurface) != true {
+                given[normSurface] = normReading
+                readingCounts[normSurface] = nil
+            }
+        }
+        var index = 0
+        while index < merged.count {
+            let entry = merged[index]
+            if let reading = given[entry.surface], entry.cost == learnedLexiconCost {
+                if entry.reading != reading {
+                    merged[index] = LexiconEntry(surface: entry.surface, reading: reading, pos: entry.pos, accentKernel: 0, cost: learnedLexiconCost)
+                }
+                given[entry.surface] = nil
+            }
+            index += 1
+        }
+        for surface in given.keys.sorted() where reserved.contains(surface) != true {
+            merged.append(LexiconEntry(surface: surface, reading: given[surface]!, pos: .noun, accentKernel: 0, cost: learnedLexiconCost))
+            added += 1
+        }
         let surfaces = readingCounts.keys.sorted()
         for surface in surfaces {
             guard let counts = readingCounts[surface] else {
@@ -447,6 +503,28 @@ public final class ViterbiMorphology: Sendable {
     /// テキストの指定開始位置から共通接頭辞検索を行う
     ///
     /// 最大語長までの各部分文字列に対して二分探索を適用し、確実に全一致エントリを抽出する。
+    /// 語彙に無い外来語（カタカナ語・英字の語）のアクセント核
+    ///
+    /// 外来語の一般的な規則: 後ろから 3 拍目に核を置き、その拍が長音・撥音・促音なら 1 拍前にずらす。2 拍以下は頭高。
+    static func loanwordAccentKernel(reading: String) -> Int16 {
+        let small: Set<Character> = ["ゃ", "ゅ", "ょ", "ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "ゎ"]
+        var moras: [Character] = []
+        for ch in reading where small.contains(ch) != true {
+            moras.append(ch)
+        }
+        if moras.count <= 2 {
+            return moras.isEmpty ? 0 : 1
+        }
+        var kernel = moras.count - 2
+        if 1 < kernel && ["ー", "ん", "っ"].contains(moras[kernel - 1]) {
+            kernel -= 1
+        }
+        return Int16(kernel)
+    }
+
+    /// 語彙照合で試す表記の最大文字数（長いカタカナ語・英字の語も一致させる）
+    static let maxSurfaceLength = 20
+
     public func commonPrefixSearch(in chars: [Character], startOffset: Int) -> [LexiconEntry] {
         let count = chars.count
         if count <= startOffset {
@@ -454,7 +532,7 @@ public final class ViterbiMorphology: Sendable {
         }
 
         var matches: [LexiconEntry] = []
-        var maxLen = 10
+        var maxLen = Self.maxSurfaceLength
         let remaining = count - startOffset
         if remaining < maxLen {
             maxLen = remaining
@@ -530,10 +608,34 @@ public final class ViterbiMorphology: Sendable {
                         surface: katakanaStr,
                         reading: katakanaReading,
                         pos: .noun,
-                        accentKernel: 0,
+                        accentKernel: Self.loanwordAccentKernel(reading: katakanaReading),
                         nodeCost: Int16(min(Int(Int16.max), 120 * kLen))
                     )
                     nodesStartingAt[pos].append(katakanaNode)
+                    nextNodeId += 1
+                }
+            }
+
+            // 連続する英字列（英単語・略語）の一括ノード。語彙に無い語を 1 文字ずつのアルファベット読みにしないため
+            if EnglishReading.isLatinLetter(char) {
+                var lEnd = pos + 1
+                while lEnd < charCount && EnglishReading.isLatinLetter(chars[lEnd]) {
+                    lEnd += 1
+                }
+                let lLen = lEnd - pos
+                if 1 < lLen {
+                    let word = String(chars[pos..<lEnd])
+                    let latinNode = LatticeNode(
+                        id: nextNodeId,
+                        startPos: pos,
+                        length: lLen,
+                        surface: word,
+                        reading: EnglishReading.bestGuess(word),
+                        pos: .noun,
+                        accentKernel: Self.loanwordAccentKernel(reading: EnglishReading.bestGuess(word)),
+                        nodeCost: Int16(min(Int(Int16.max), 120 * lLen))
+                    )
+                    nodesStartingAt[pos].append(latinNode)
                     nextNodeId += 1
                 }
             }
@@ -689,55 +791,6 @@ public final class ViterbiMorphology: Sendable {
         }
 
         return reversedMorphemes.reversed()
-    }
-
-    /// 英字1文字を自然な日本語アルファベット読みに展開する
-    /// なぜアルファベット読みに展開するか:
-    /// 辞書未登録の英単語や英字記号であっても音素が脱落せず、
-    /// 「AI」が「えーあい」のように明瞭に発話されるようにするため。
-    private static func readingForAlphabet(_ char: Character) -> String {
-        let scalar = char.unicodeScalars.first!
-        let val = scalar.value
-        let lowerVal: UInt32
-        switch true {
-        case 0x41 <= val && val <= 0x5A: // A-Z
-            lowerVal = val + 0x20
-        case 0xFF21 <= val && val <= 0xFF3A: // 全角 A-Z
-            lowerVal = val - 0xFF21 + 0x61
-        case 0xFF41 <= val && val <= 0xFF5A: // 全角 a-z
-            lowerVal = val - 0xFF41 + 0x61
-        default:
-            lowerVal = val
-        }
-        switch lowerVal {
-        case 0x61: return "えー"     // a
-        case 0x62: return "びー"     // b
-        case 0x63: return "しー"     // c
-        case 0x64: return "でぃー"   // d
-        case 0x65: return "いー"     // e
-        case 0x66: return "えふ"     // f
-        case 0x67: return "じー"     // g
-        case 0x68: return "えいち"   // h
-        case 0x69: return "あい"     // i
-        case 0x6A: return "じぇー"   // j
-        case 0x6B: return "けー"     // k
-        case 0x6C: return "える"     // l
-        case 0x6D: return "えむ"     // m
-        case 0x6E: return "えぬ"     // n
-        case 0x6F: return "おー"     // o
-        case 0x70: return "ぴー"     // p
-        case 0x71: return "きゅー"   // q
-        case 0x72: return "あーる"   // r
-        case 0x73: return "えす"     // s
-        case 0x74: return "てぃー"   // t
-        case 0x75: return "ゆー"     // u
-        case 0x76: return "ぶい"     // v
-        case 0x77: return "だぶりゅー" // w
-        case 0x78: return "えっくす" // x
-        case 0x79: return "わい"     // y
-        case 0x7A: return "ぜっと"   // z
-        default:   return String(char)
-        }
     }
 
     /// 辞書未登録の漢字文字・熟語に対する日本語音訓フォールバック読みを導出する
@@ -964,8 +1017,7 @@ public final class ViterbiMorphology: Sendable {
         case 0x30...0x39, 0xFF10...0xFF19: // 数字
             return (.noun, str, 150)
         case 0x41...0x5A, 0x61...0x7A, 0xFF21...0xFF3A, 0xFF41...0xFF5A: // 英字
-            let alphaReading = Self.readingForAlphabet(char)
-            return (.noun, alphaReading, 300)
+            return (.noun, EnglishReading.letterName(char) ?? str, 300)
         default:
             return (.symbol, str, 250)
         }
