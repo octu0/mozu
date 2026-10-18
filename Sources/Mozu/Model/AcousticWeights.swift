@@ -68,6 +68,10 @@ public struct AcousticConfig: Sendable, Codable, Equatable {
         self.energyStd = energyStd
     }
 
+    public func withLabelKinds(_ kinds: [String]) -> AcousticConfig {
+        return AcousticConfig(phonemeVocabSize: phonemeVocabSize, featureCount: featureCount, modelDim: modelDim, headHiddenDim: headHiddenDim, melChannels: melChannels, labelKinds: kinds, encoder: encoder, decoder: decoder, pitchMean: pitchMean, pitchStd: pitchStd, energyMean: energyMean, energyStd: energyStd)
+    }
+
     public func withNormalization(pitchMean: Float, pitchStd: Float, energyMean: Float, energyStd: Float) -> AcousticConfig {
         return AcousticConfig(phonemeVocabSize: phonemeVocabSize, featureCount: featureCount, modelDim: modelDim, headHiddenDim: headHiddenDim, melChannels: melChannels, labelKinds: labelKinds, encoder: encoder, decoder: decoder, pitchMean: pitchMean, pitchStd: pitchStd, energyMean: energyMean, energyStd: energyStd)
     }

@@ -35,6 +35,22 @@ public final class MozuEngine: @unchecked Sendable {
         return MozuEngine(weights: try MozuWeights.load(from: URL(fileURLWithPath: path)))
     }
 
+    /// 声の指定（"female,ギャル,age=10代後半" など）を、重みのラベル語彙で解決する
+    ///
+    /// "=" の無い値は、その値を持つラベルの種類を探して当てはめる。ラベル語彙の無い重みでは従来のプリセットとして扱う。
+    public func voice(named spec: String) throws -> VoiceProfile {
+        switch spec.lowercased().trimmingCharacters(in: .whitespaces) {
+        case "", "neutral", "default":
+            return .neutral
+        default:
+            break
+        }
+        if weights.labels.kinds.isEmpty {
+            return VoiceProfile.preset(named: spec)
+        }
+        return VoiceProfile(name: spec, labels: try weights.labels.resolve(spec))
+    }
+
     /// Mel まで合成する。音響モデルが無ければ nil
     public func synthesizeMel(text: String, voice: VoiceProfile = .default, speed: Float = 1.0, pitch: Float = 1.0) -> (sequence: PhonemeSequence, output: AcousticModel.Output)? {
         guard let acoustic = acoustic else {

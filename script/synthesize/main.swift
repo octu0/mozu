@@ -8,7 +8,9 @@ import Mozu
 func printUsage() {
     print("""
     Usage: synthesize -w <weights.json> (-t <text> | --copy <input.wav>) [-o <output.wav>] [-v <voice>] [--speed 1.0] [--pitch 1.0] [--mel-out <mel.json>]
-      -v  プリセット名 (female/male/neutral) または key=value,key=value（例: gender=female,dialect=標準語）
+           synthesize -w <weights.json> --voices
+      -v        ラベルの値をカンマ区切りで並べる（例: female,ギャル,age=10代後半）。"=" の無い値は種類を自動で探す
+      --voices  重みが知っているラベルの種類と値を一覧する
     """)
 }
 
@@ -20,6 +22,7 @@ var voiceName = "default"
 var speed: Float = 1.0
 var pitch: Float = 1.0
 var melOutPath: String? = nil
+var listVoices = false
 
 let args = CommandLine.arguments
 var i = 1
@@ -49,6 +52,8 @@ while i < args.count {
         pitch = Float(next() ?? "1") ?? 1.0
     case "--mel-out":
         melOutPath = next()
+    case "--voices":
+        listVoices = true
     case "--help", "-h":
         printUsage()
         exit(0)
@@ -72,7 +77,24 @@ do {
     print("エラー: 重みを読み込めません: \(error)")
     exit(1)
 }
-let voice = VoiceProfile.preset(named: voiceName)
+if listVoices {
+    let labels = engine.weights.labels
+    if labels.kinds.isEmpty {
+        print("この重みには条件付けラベルがありません。")
+    }
+    for kind in labels.kinds {
+        let values = labels.values[kind] ?? []
+        print("\(kind)（\(values.count) 種）: " + values.joined(separator: ", "))
+    }
+    exit(0)
+}
+let voice: VoiceProfile
+do {
+    voice = try engine.voice(named: voiceName)
+} catch {
+    print("エラー: 声の指定を解釈できません: \(error)")
+    exit(1)
+}
 var samples: [Float] = []
 let started = Date()
 if let input = copyPath {

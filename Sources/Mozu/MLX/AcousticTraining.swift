@@ -60,23 +60,31 @@ public enum AcousticTraining {
         var rng = SystemRandomNumberGenerator()
         // 正規化定数は毎回データから取り直す（ウォームスタートでもコーパスが変われば変わる）
         let norm = SampleBuilder.normalization(samples: samples)
-        let effectiveConfig = (initial?.config ?? config).withNormalization(pitchMean: norm.pitchMean, pitchStd: norm.pitchStd, energyMean: norm.energyMean, energyStd: norm.energyStd)
+        // 重みに無い種類のラベルがコーパスにあれば末尾に足す（既存の種類の順序と埋め込みは変えない）
+        let baseConfig = initial?.config ?? config
+        let addedKinds = labels.kinds.filter { baseConfig.labelKinds.contains($0) != true }
+        let effectiveConfig = baseConfig.withLabelKinds(baseConfig.labelKinds + addedKinds).withNormalization(pitchMean: norm.pitchMean, pitchStd: norm.pitchStd, energyMean: norm.energyMean, energyStd: norm.energyStd)
         let labelCounts = effectiveConfig.labelKinds.map { labels.count(kind: $0) }
         let model: MLXAcousticModel
         switch initial {
         case .some(let w):
             model = MLXAcousticModel(config: effectiveConfig, labelCounts: labelCounts)
             model.load(w)
-            // ラベル語彙が増えていたら埋め込み表を広げる
+            // ラベルの種類や値が増えていたら埋め込み表を足す・広げる（新しい分は 0 = 未指定と同じから始める）
             var k = 0
             while k < labelCounts.count {
-                let old = model.labelEmbeddings[k]
-                if old.shape[0] < labelCounts[k] {
+                if model.labelEmbeddings.count <= k {
+                    model.labelEmbeddings.append(MLXArray.zeros([labelCounts[k], effectiveConfig.modelDim]))
+                } else if model.labelEmbeddings[k].shape[0] < labelCounts[k] {
+                    let old = model.labelEmbeddings[k]
                     model.labelEmbeddings[k] = concatenated([old, MLXArray.zeros([labelCounts[k] - old.shape[0], effectiveConfig.modelDim])], axis: 0)
                 }
                 k += 1
             }
             log("既存の音響モデルからウォームスタートします（パラメータ \(w.parameterCount)）。")
+            if addedKinds.isEmpty != true {
+                log("新しいラベルの種類を追加しました: \(addedKinds.joined(separator: ", "))")
+            }
         case .none:
             model = MLXAcousticModel(config: effectiveConfig, labelCounts: labelCounts)
             log("音響モデルを新規に初期化しました。")

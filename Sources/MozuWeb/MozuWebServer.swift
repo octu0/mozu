@@ -434,7 +434,7 @@ public final class MozuWebServer: @unchecked Sendable {
         oldToken?.cancel()
 
         let voiceName = request.voice ?? "female"
-        let voiceProfile = VoiceProfile.preset(named: voiceName)
+        let voiceProfile = (try? engine.voice(named: voiceName)) ?? VoiceProfile.preset(named: voiceName)
         let startTime = PlatformTime.uptimeNanoseconds()
 
         switch request.mode {

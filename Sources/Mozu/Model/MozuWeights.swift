@@ -49,6 +49,74 @@ public struct LabelVocabulary: Sendable, Codable, Equatable {
     public func indices(for labels: [String: String]) -> [Int] {
         return kinds.map { index(kind: $0, value: labels[$0]) }
     }
+
+    /// 声の指定 "female,ギャル,kind=value,..." をラベルに直す
+    ///
+    /// "kind=value" はそのまま使い、"=" の無い値は、その値を持つ種類を語彙から探して当てはめる
+    /// （大文字・小文字は区別しない）。見つからない値や、複数の種類にある値はエラーにする。
+    public func resolve(_ spec: String) throws -> [String: String] {
+        var labels: [String: String] = [:]
+        for raw in spec.split(separator: ",") {
+            let item = raw.trimmingCharacters(in: .whitespaces)
+            if item.isEmpty {
+                continue
+            }
+            let kv = item.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+            if kv.count == 2 {
+                guard kinds.contains(kv[0]) else {
+                    throw LabelSpecError.unknownKind(kv[0], available: kinds)
+                }
+                guard let value = (values[kv[0]] ?? []).first(where: { $0.lowercased() == kv[1].lowercased() }) else {
+                    throw LabelSpecError.unknownValue(kv[1], suggestions: suggestions(for: kv[1], in: [kv[0]]))
+                }
+                labels[kv[0]] = value
+                continue
+            }
+            let matches = kinds.compactMap { kind -> (String, String)? in
+                (values[kind] ?? []).first { $0.lowercased() == item.lowercased() }.map { (kind, $0) }
+            }
+            switch matches.count {
+            case 1:
+                labels[matches[0].0] = matches[0].1
+            case 0:
+                throw LabelSpecError.unknownValue(item, suggestions: suggestions(for: item, in: kinds))
+            default:
+                throw LabelSpecError.ambiguous(item, kinds: matches.map { $0.0 })
+            }
+        }
+        return labels
+    }
+
+    /// 部分一致する値（"kind=value" の形、最大 10 件）
+    func suggestions(for text: String, in searchKinds: [String]) -> [String] {
+        let key = text.lowercased()
+        var out: [String] = []
+        for kind in searchKinds {
+            for value in values[kind] ?? [] where value.lowercased().contains(key) || key.contains(value.lowercased()) {
+                out.append("\(kind)=\(value)")
+            }
+        }
+        return Array(out.prefix(10))
+    }
+}
+
+/// 声の指定の誤り
+public enum LabelSpecError: Error, CustomStringConvertible, Equatable {
+    case unknownKind(String, available: [String])
+    case unknownValue(String, suggestions: [String])
+    case ambiguous(String, kinds: [String])
+
+    public var description: String {
+        switch self {
+        case .unknownKind(let kind, let available):
+            return "ラベルの種類「\(kind)」はありません（使える種類: \(available.joined(separator: ", "))）。"
+        case .unknownValue(let value, let suggestions):
+            let hint = suggestions.isEmpty ? "" : "（近い値: \(suggestions.joined(separator: ", "))）"
+            return "ラベルの値「\(value)」はありません\(hint)。"
+        case .ambiguous(let value, let kinds):
+            return "「\(value)」は複数の種類（\(kinds.joined(separator: ", "))）にあります。kind=value の形で指定してください。"
+        }
+    }
 }
 
 /// mozu の重みコンテナ
