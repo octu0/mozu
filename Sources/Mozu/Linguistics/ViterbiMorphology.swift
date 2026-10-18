@@ -209,6 +209,8 @@ public final class ViterbiMorphology: Sendable {
         public let lexicon: [LexiconEntry]
         /// 新規に追加されたエントリ数
         public let added: Int
+        /// 既存エントリのうち、読み（コーパスが与える読み）または核の初期値を更新した数
+        public let updated: Int
         /// 獲得元の文数
         public let sentenceCount: Int
     }
@@ -374,6 +376,7 @@ public final class ViterbiMorphology: Sendable {
 
         var merged = baseList
         var added = 0
+        var updated = 0
         // コーパスが与える読み: 獲得済みの語は読みを置き換え（読みが変われば核は未知に戻す）、無い語は追加する
         var given: [String: String] = [:]
         for (surface, reading) in readings {
@@ -389,15 +392,29 @@ public final class ViterbiMorphology: Sendable {
             let entry = merged[index]
             if let reading = given[entry.surface], entry.cost == learnedLexiconCost {
                 if entry.reading != reading {
-                    merged[index] = LexiconEntry(surface: entry.surface, reading: reading, pos: entry.pos, accentKernel: 0, cost: learnedLexiconCost)
+                    merged[index] = LexiconEntry(surface: entry.surface, reading: reading, pos: entry.pos, accentKernel: initialKernel(surface: entry.surface, reading: reading), cost: learnedLexiconCost)
+                    updated += 1
                 }
                 given[entry.surface] = nil
             }
             index += 1
         }
         for surface in given.keys.sorted() where reserved.contains(surface) != true {
-            merged.append(LexiconEntry(surface: surface, reading: given[surface]!, pos: .noun, accentKernel: 0, cost: learnedLexiconCost))
+            merged.append(LexiconEntry(surface: surface, reading: given[surface]!, pos: .noun, accentKernel: initialKernel(surface: surface, reading: given[surface]!), cost: learnedLexiconCost))
             added += 1
+        }
+        // 以前の版で核 0（未知）のまま獲得した外来語にも推定の核を入れる
+        index = 0
+        while index < merged.count {
+            let entry = merged[index]
+            if entry.cost == learnedLexiconCost && entry.accentKernel == 0 {
+                let kernel = initialKernel(surface: entry.surface, reading: entry.reading)
+                if kernel != 0 {
+                    merged[index] = LexiconEntry(surface: entry.surface, reading: entry.reading, pos: entry.pos, accentKernel: kernel, cost: learnedLexiconCost)
+                    updated += 1
+                }
+            }
+            index += 1
         }
         let surfaces = readingCounts.keys.sorted()
         for surface in surfaces {
@@ -419,13 +436,13 @@ public final class ViterbiMorphology: Sendable {
                 surface: surface,
                 reading: bestReading,
                 pos: .noun,
-                accentKernel: 0,
+                accentKernel: initialKernel(surface: surface, reading: bestReading),
                 cost: learnedLexiconCost
             ))
             added += 1
         }
 
-        return LexiconLearningResult(lexicon: merged, added: added, sentenceCount: sentenceCount)
+        return LexiconLearningResult(lexicon: merged, added: added, updated: updated, sentenceCount: sentenceCount)
     }
 
     /// 文全体を日本語ロケールの単語単位で分かち書きし、各語の読み（ひらがな）を返す
@@ -503,10 +520,19 @@ public final class ViterbiMorphology: Sendable {
     /// テキストの指定開始位置から共通接頭辞検索を行う
     ///
     /// 最大語長までの各部分文字列に対して二分探索を適用し、確実に全一致エントリを抽出する。
+    /// 獲得語彙の核の初期値。外来語（カタカナ語・英字の語）は loanwordAccentKernel、それ以外は 0（未知）
+    ///
+    /// なぜ外来語だけ推定値を入れるか: 促音・無声化した拍が多く F0 から核を決められない語（コップ など）が多く、
+    /// 未知のままだと平板で読まれるため。音声から十分な票が集まれば AccentLearning が上書きする。
+    public static func initialKernel(surface: String, reading: String) -> Int16 {
+        let isLoanword = surface.allSatisfy { EnglishReading.isLatinLetter($0) || (isKatakanaOrProlonged($0) && $0 != "・") }
+        return isLoanword ? loanwordAccentKernel(reading: reading) : 0
+    }
+
     /// 語彙に無い外来語（カタカナ語・英字の語）のアクセント核
     ///
     /// 外来語の一般的な規則: 後ろから 3 拍目に核を置き、その拍が長音・撥音・促音なら 1 拍前にずらす。2 拍以下は頭高。
-    static func loanwordAccentKernel(reading: String) -> Int16 {
+    public static func loanwordAccentKernel(reading: String) -> Int16 {
         let small: Set<Character> = ["ゃ", "ゅ", "ょ", "ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "ゎ"]
         var moras: [Character] = []
         for ch in reading where small.contains(ch) != true {

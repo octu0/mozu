@@ -194,7 +194,7 @@ public struct AccentLearning {
     public var strongShare: Float = 0.7
 
     /// 投票結果で語彙の核を更新した語彙を返す。
-    /// - 獲得語彙（cost == learnedLexiconCost、核が未知で 0 のまま登録された語）は通常の閾値で更新する。
+    /// - 獲得語彙（cost == learnedLexiconCost）で核がまだ初期値（0 = 未知、外来語は規則による推定値）のままの語は、通常の閾値で更新する。
     /// - それ以外（手作業の基本語彙）は、票数 strongVotes 以上かつ勝者比率 strongShare 以上のときだけ上書きし、
     ///   上書きした語は overridden に列挙する（辞書の核位置とピーク遅延後の実際の下降位置は 1 モーラずれ得るため、
     ///   話者の実現形に合わせる）。
@@ -210,9 +210,9 @@ public struct AccentLearning {
                 out.append(entry)
                 continue
             }
-            let isLearned = entry.cost == ViterbiMorphology.learnedLexiconCost && entry.accentKernel == 0
+            let isLearned = entry.cost == ViterbiMorphology.learnedLexiconCost && entry.accentKernel == ViterbiMorphology.initialKernel(surface: entry.surface, reading: entry.reading)
             if isLearned {
-                if tally.votes < 2 && w.kernel != 0 && tally.maxConfidence < singleVoteConfidence {
+                if tally.votes < 2 && w.kernel != Int(entry.accentKernel) && tally.maxConfidence < singleVoteConfidence {
                     out.append(entry)
                     continue
                 }

@@ -66,6 +66,7 @@ final class EnglishReadingTests: XCTestCase {
         XCTAssertEqual(first.lexicon.first { $0.surface == "VIVANT" }?.reading, EnglishReading.bestGuess("VIVANT"))
         let second = ViterbiMorphology.learnLexiconEntries(sentences: ["VIVANTを見た", "K-POPが好き"], existing: first.lexicon, readings: ["VIVANT": "ビバン", "KPOP": "ケーポップ"])
         XCTAssertEqual(second.lexicon.filter { $0.surface == "VIVANT" }.map { $0.reading }, ["びばん"])
+        XCTAssertEqual(second.updated, 1, "新しい語が無くても既存の読みの置き換えは結果に含まれる")
         XCTAssertEqual(second.lexicon.first { $0.surface == "KPOP" }?.reading, "けーぽっぷ")
     }
 
@@ -76,5 +77,13 @@ final class EnglishReadingTests: XCTestCase {
         XCTAssertEqual(ViterbiMorphology.loanwordAccentKernel(reading: "ぱーてぃー"), 1)
         XCTAssertEqual(ViterbiMorphology.loanwordAccentKernel(reading: "こっぷ"), 1)
         XCTAssertEqual(ViterbiMorphology.loanwordAccentKernel(reading: "ぱん"), 1)
+    }
+
+    /// 獲得した外来語は規則による核の推定値で登録され、漢字語は未知（0）のまま
+    func testLearnedLoanwordsGetInitialKernel() {
+        let result = ViterbiMorphology.learnLexiconEntries(sentences: ["コップに水を入れる", "SNSで見た"], existing: [])
+        XCTAssertEqual(result.lexicon.first { $0.surface == "コップ" }?.accentKernel, 1)
+        XCTAssertEqual(result.lexicon.first { $0.surface == "SNS" }?.accentKernel, ViterbiMorphology.loanwordAccentKernel(reading: "えすえぬえす"))
+        XCTAssertEqual(result.lexicon.first { $0.surface == "水" }?.accentKernel, 0)
     }
 }

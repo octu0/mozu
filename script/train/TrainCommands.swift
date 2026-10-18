@@ -87,12 +87,8 @@ enum TrainCommands {
             readings.merge(corpus.readings) { first, _ in first }
         }
         let learned = ViterbiMorphology.learnLexiconEntries(sentences: sentences, existing: weights.lexicon, readings: readings)
-        if 0 < learned.added {
-            weights.lexicon = learned.lexicon
-            print("転写 \(learned.sentenceCount) 文から語彙を \(learned.added) 件獲得しました（語彙合計 \(weights.lexicon.count) 件）。")
-        } else {
-            print("転写 \(learned.sentenceCount) 文に新規語彙はありませんでした（語彙合計 \(weights.lexicon.count) 件）。")
-        }
+        weights.lexicon = learned.lexicon
+        print("転写 \(learned.sentenceCount) 文から語彙を \(learned.added) 件獲得し、\(learned.updated) 件の読み・核の初期値を更新しました（語彙合計 \(weights.lexicon.count) 件）。")
         weights.labels.register(corpora: corpora)
         if weights.labels.kinds.isEmpty != true {
             let summary = weights.labels.kinds.map { "\($0) \(weights.labels.count(kind: $0) - 1) 種" }.joined(separator: ", ")
