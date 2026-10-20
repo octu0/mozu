@@ -81,6 +81,8 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
     public var decoderNorm: MLXArray
     public var melProjection: MLXArray
     public var melBias: MLXArray
+    /// 話し方の潜在変数の参照エンコーダ（任意）
+    public var style: MLXStyleEncoder?
 
     public init(config: AcousticConfig, labelCounts: [Int]) {
         precondition(labelCounts.count == config.labelKinds.count)
@@ -135,6 +137,7 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         decoderNorm = MLXArray(w.decoderNorm.values, w.decoderNorm.shape)
         melProjection = MLXArray(w.melProjection.values, w.melProjection.shape)
         melBias = MLXArray(w.melBias.values, w.melBias.shape)
+        style = w.style.map { MLXStyleEncoder(weights: $0) }
     }
 
     public func exportWeights(config exportConfig: AcousticConfig? = nil) -> AcousticWeights {
@@ -154,7 +157,8 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
             decoder: decoder.exportWeights(),
             decoderNorm: tensor(decoderNorm),
             melProjection: tensor(melProjection),
-            melBias: tensor(melBias)
+            melBias: tensor(melBias),
+            style: style?.exportWeights()
         )
     }
 
@@ -172,6 +176,10 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         public let position: MLXArray        // [B, T, 1]
         public let frameMask: MLXArray       // [B, T, 1]
         public let mel: MLXArray             // [B, T, melChannels]
+        /// 潜在変数を使う発話は 1、伏せる発話は 0 [B, 1, 1]
+        public let styleMask: MLXArray
+        /// 潜在変数を分布から引く（学習）か平均を使う（検証）か
+        public let sampleLatent: Bool
         public let batchSize: Int
         public let phoneCount: Int
         public let frameCount: Int
@@ -182,6 +190,9 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         public let logDurations: MLXArray   // [B, P, 1]
         public let pitch: MLXArray          // [B, P, 1]
         public let energy: MLXArray         // [B, P, 1]
+        /// 潜在変数の平均・対数分散 [B, latentDim]（style が無ければ nil）
+        public let latentMean: MLXArray?
+        public let latentLogVar: MLXArray?
     }
 
     /// 教師強制（継続時間・ピッチ・エネルギーは教師値）で順伝播する
@@ -196,9 +207,27 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
             x = x + style
             k += 1
         }
+        // 話し方の潜在変数: 実測 Mel から推定し、ラベルと同じく全音素に足す
+        var latentStyle: MLXArray? = nil
+        var latentMean: MLXArray? = nil
+        var latentLogVar: MLXArray? = nil
+        if let encoderStyle = style {
+            let (mean, logVar) = encoderStyle.encode(batch.mel, frameMask: batch.frameMask)
+            var z = mean
+            if batch.sampleLatent {
+                z = mean + exp(0.5 * logVar) * MLXRandom.normal(mean.shape)
+            }
+            let s = matmul(z, encoderStyle.styleProjection).reshaped([batch.batchSize, 1, d]) * batch.styleMask
+            x = x + s
+            latentStyle = s
+            latentMean = mean
+            latentLogVar = logVar
+        }
         let encoded = hawkRMSNorm(encoder(x, frameMask: batch.phoneMask), encoderNorm)
-        // 継続時間ヘッドはエンコーダへ勾配を流さない（継続時間の誤差で Mel 向けの特徴を歪めないため）
-        let logDurations = durationHead(stopGradient(encoded))
+        // 継続時間ヘッドはエンコーダへ勾配を流さない（継続時間の誤差で Mel 向けの特徴を歪めないため）。
+        // 潜在変数は直接足して、話す速さを z から読めるようにする
+        let durationInput = latentStyle.map { stopGradient(encoded) + $0 } ?? stopGradient(encoded)
+        let logDurations = durationHead(durationInput)
         let pitch = pitchHead(encoded)
         let energy = energyHead(encoded)
         let conditioned = encoded + pitchProjection(batch.pitch) + energyProjection(batch.energy)
@@ -207,7 +236,7 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         frames = frames + positionProjection(batch.position)
         let decoded = hawkRMSNorm(decoder(frames, frameMask: batch.frameMask), decoderNorm)
         let mel = matmul(decoded, melProjection) + melBias
-        return Prediction(mel: mel, logDurations: logDurations, pitch: pitch, energy: energy)
+        return Prediction(mel: mel, logDurations: logDurations, pitch: pitch, energy: energy, latentMean: latentMean, latentLogVar: latentLogVar)
     }
 }
 #endif

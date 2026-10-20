@@ -123,6 +123,12 @@ public struct VoiceProfile: Sendable, Codable, Equatable {
     public var speed: Float
     /// ピッチ倍率（1.0 で学習データどおり）
     public var pitch: Float
+    /// 抑揚の倍率（1.0 で学習データどおり、大きいほど高低差が大きい）
+    public var intonation: Float = 1.0
+    /// 声の張り（エネルギーの移動、学習データの標準偏差単位。0 で学習データどおり）
+    public var energy: Float = 0.0
+    /// 話し方の潜在変数 z（話し方を持つ重みのみ。nil で平均的な話し方）
+    public var latent: [Float]? = nil
 
     public init(name: String, labels: [String: String] = [:], speed: Float = 1.0, pitch: Float = 1.0) {
         self.name = name

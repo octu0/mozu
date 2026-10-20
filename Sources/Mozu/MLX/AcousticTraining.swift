@@ -13,6 +13,18 @@ public struct AcousticTrainingOptions: Sendable {
     public var validationEvery: Int = 20
     public var seed: UInt64 = 2026
     public var labelDropout: Float = 0.1
+    /// 種類ごとのラベルの置き換え確率（例: ["speaker": 0.5]）。指定の無い種類は labelDropout
+    public var labelDropoutByKind: [String: Float] = [:]
+    /// 話し方の潜在変数（参照エンコーダ）を使う。重みに無ければ新しく作る
+    public var useStyle: Bool = false
+    /// KL の重みの最大値と、そこまで上げるステップ数
+    /// 0.01 では z がほとんど使われず（次元ごとの KL が free bits に張り付く）、0 では分布が崩れるので、その間の値
+    public var klWeight: Float = 0.001
+    public var klWarmupSteps: Int = 5000
+    /// 次元ごとの最低情報量（nats）
+    public var freeBits: Float = 0.1
+    /// 潜在変数を伏せる確率
+    public var styleDropout: Float = 0.2
     public var logEvery: Int = 50
     /// 1 バッチの詰め物込み総フレーム数の上限（メモリの山を抑える）
     public var maxBatchFrames: Int = 12000
@@ -89,8 +101,18 @@ public enum AcousticTraining {
             model = MLXAcousticModel(config: effectiveConfig, labelCounts: labelCounts)
             log("音響モデルを新規に初期化しました。")
         }
+        if options.useStyle && model.style == nil {
+            model.style = MLXStyleEncoder(melChannels: effectiveConfig.melChannels, modelDim: effectiveConfig.modelDim)
+            log("話し方の潜在変数（参照エンコーダ、\(StyleDefaults.latentDim) 次元）を新しく追加しました。")
+        }
         let trainer = MLXAcousticTrainer(model: model, learningRate: options.learningRateMin)
+        trainer.freeBits = options.freeBits
+        trainer.styleDropout = options.styleDropout
         trainer.labelDropout = options.labelDropout
+        trainer.labelDropoutByKind = options.labelDropoutByKind
+        if options.labelDropoutByKind.isEmpty != true {
+            log("ラベルの置き換え確率: 既定 \(options.labelDropout)、" + options.labelDropoutByKind.keys.sorted().map { "\($0) \(options.labelDropoutByKind[$0]!)" }.joined(separator: "、"))
+        }
 
         var train: [UtteranceSample] = []
         var valid: [UtteranceSample] = []
@@ -124,9 +146,10 @@ public enum AcousticTraining {
             for indices in batches {
                 step += 1
                 trainer.learningRate = scheduler.learningRate(step: step, totalSteps: totalSteps, warmupSteps: options.warmupSteps)
+                trainer.klWeight = options.klWeight * min(1.0, Float(step) / Float(max(1, options.klWarmupSteps)))
                 let chosen = indices.map { train[$0] }
                 let mels = chosen.contains { $0.mel.isEmpty } ? SampleBuilder.loadMels(samples: chosen) : nil
-                let batch = trainer.makeBatch(chosen, mels: mels, dropLabels: true, rng: &rng)
+                let batch = trainer.makeBatch(chosen, mels: mels, dropLabels: true, latent: .train, rng: &rng)
                 let losses = trainer.trainStep(batch)
                 if losses.total.isFinite != true {
                     log("警告: 非有限の損失が出ました（ステップ \(step)）。")
@@ -136,29 +159,42 @@ public enum AcousticTraining {
                 recent = recent + losses
                 recentCount += 1
                 if options.logEvery > 0 && recentCount % options.logEvery == 0 {
-                    log(String(format: "  ステップ %d/%d  lr %.2e  勾配ノルム %.2f  直近 %@", step - (epoch - 1) * stepsPerEpoch, stepsPerEpoch, trainer.learningRate, trainer.lastGradientNorm, recent.scaled(1.0 / Float(recentCount)).description))
+                    var line = String(format: "  ステップ %d/%d  lr %.2e  勾配ノルム %.2f  直近 %@", step - (epoch - 1) * stepsPerEpoch, stepsPerEpoch, trainer.learningRate, trainer.lastGradientNorm, recent.scaled(1.0 / Float(recentCount)).description)
+                    if model.style != nil {
+                        // 次元が使われなくなっていないかの確認用（free bits を超えた次元数と、次元ごとの KL）
+                        let active = trainer.lastKLPerDim.filter { options.freeBits < $0 }.count
+                        line += String(format: "  β %.4f  有効次元 %d/%d [", trainer.klWeight, active, trainer.lastKLPerDim.count) + trainer.lastKLPerDim.map { String(format: "%.2f", $0) }.joined(separator: " ") + "]"
+                    }
+                    log(line)
                     recent = AcousticLosses()
                     recentCount = 0
                 }
             }
             let trainAverage = epochSum.scaled(1.0 / Float(max(1, batches.count)))
-            // 検証（ラベルは落とさない）
-            var validSum = AcousticLosses()
-            var validBatches = 0
-            var vStart = 0
-            while vStart < valid.count {
-                let vEnd = min(valid.count, vStart + options.batchSize)
-                let chosen = Array(valid[vStart..<vEnd])
-                let mels = chosen.contains { $0.mel.isEmpty } ? SampleBuilder.loadMels(samples: chosen) : nil
-                let batch = trainer.makeBatch(chosen, mels: mels, dropLabels: false, rng: &rng)
-                validSum = validSum + trainer.evaluate(batch)
-                validBatches += 1
-                vStart = vEnd
+            // 検証（ラベルは落とさない）。潜在変数がある場合は z = 0（参照なし）で採択し、推定した z での値も併記する
+            func validate(_ latent: MLXAcousticTrainer.LatentMode) -> AcousticLosses {
+                var validSum = AcousticLosses()
+                var validBatches = 0
+                var vStart = 0
+                while vStart < valid.count {
+                    let vEnd = min(valid.count, vStart + options.batchSize)
+                    let chosen = Array(valid[vStart..<vEnd])
+                    let mels = chosen.contains { $0.mel.isEmpty } ? SampleBuilder.loadMels(samples: chosen) : nil
+                    let batch = trainer.makeBatch(chosen, mels: mels, dropLabels: false, latent: latent, rng: &rng)
+                    validSum = validSum + trainer.evaluate(batch)
+                    validBatches += 1
+                    vStart = vEnd
+                }
+                return validSum.scaled(1.0 / Float(max(1, validBatches)))
             }
-            let validAverage = validSum.scaled(1.0 / Float(max(1, validBatches)))
+            let validAverage = validate(model.style == nil ? .posterior : .prior)
+            let validPosterior: AcousticLosses? = model.style == nil ? nil : validate(.posterior)
             let elapsed = Date().timeIntervalSince(started)
             log(String(format: "[Epoch %d/%d] 学習 %@  (%.0f 秒, GPU ピーク %.1f GB)", epoch, options.epochs, trainAverage.description, elapsed, Double(GPU.peakMemory) / Double(1 << 30)))
-            log(String(format: "              検証 %@  採択値 %.4f", validAverage.description, validAverage.selection))
+            log(String(format: "              検証 %@  採択値 %.4f", validAverage.description, validAverage.selection) + (model.style == nil ? "" : "（z = 0）"))
+            if let posterior = validPosterior {
+                log("              検証（参照から推定した z） " + posterior.description)
+            }
             if validAverage.selection < bestSelection {
                 bestSelection = validAverage.selection
                 let weights = model.exportWeights(config: effectiveConfig)

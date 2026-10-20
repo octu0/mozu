@@ -51,6 +51,19 @@ public final class MozuEngine: @unchecked Sendable {
         return VoiceProfile(name: spec, labels: try weights.labels.resolve(spec))
     }
 
+    /// 話し方のクラスタ名から潜在変数を引く（無ければ nil）
+    public func styleLatent(named name: String) -> [Float]? {
+        return weights.acoustic?.style?.clusters.first { $0.name == name }?.latent
+    }
+
+    /// 参照音声の話し方の潜在変数（参照エンコーダの平均）。話し方を持たない重みでは nil
+    public func styleLatent(reference pcm: [Float]) -> [Float]? {
+        guard let style = weights.acoustic?.style else {
+            return nil
+        }
+        return StyleEncoder(weights: style).encode(mel: MelSpectrogramExtractor().extractLogMel(pcm: pcm)).mean
+    }
+
     /// Mel まで合成する。音響モデルが無ければ nil
     public func synthesizeMel(text: String, voice: VoiceProfile = .default, speed: Float = 1.0, pitch: Float = 1.0) -> (sequence: PhonemeSequence, output: AcousticModel.Output)? {
         guard let acoustic = acoustic else {
@@ -68,7 +81,10 @@ public final class MozuEngine: @unchecked Sendable {
             features: sequence.features,
             labelIndices: labelIndices,
             speed: speedScale,
-            pitchShift: log2(pitchScale)
+            pitchShift: log2(pitchScale),
+            intonation: VoiceProfile.clamp(voice.intonation, 0.5, 2.0, fallback: 1.0),
+            energyShift: VoiceProfile.clamp(voice.energy, -2.0, 2.0, fallback: 0.0),
+            latent: voice.latent
         )
         return (sequence, output)
     }

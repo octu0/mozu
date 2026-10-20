@@ -96,8 +96,10 @@ public struct AcousticWeights: Sendable, Codable, Equatable {
     public var decoderNorm: Tensor             // [modelDim]
     public var melProjection: Tensor           // [modelDim, melChannels]
     public var melBias: Tensor                 // [melChannels]
+    /// 話し方の潜在変数（任意。無い重みでは z を使わない）
+    public var style: StyleWeights?
 
-    public init(config: AcousticConfig, phonemeEmbedding: Tensor, featureProjection: Tensor, labelEmbeddings: [Tensor], encoder: HawkStackWeights, encoderNorm: Tensor, durationHead: HeadWeights, pitchHead: HeadWeights, energyHead: HeadWeights, pitchProjection: ScalarProjection, energyProjection: ScalarProjection, positionProjection: ScalarProjection, decoder: HawkStackWeights, decoderNorm: Tensor, melProjection: Tensor, melBias: Tensor) {
+    public init(config: AcousticConfig, phonemeEmbedding: Tensor, featureProjection: Tensor, labelEmbeddings: [Tensor], encoder: HawkStackWeights, encoderNorm: Tensor, durationHead: HeadWeights, pitchHead: HeadWeights, energyHead: HeadWeights, pitchProjection: ScalarProjection, energyProjection: ScalarProjection, positionProjection: ScalarProjection, decoder: HawkStackWeights, decoderNorm: Tensor, melProjection: Tensor, melBias: Tensor, style: StyleWeights? = nil) {
         self.config = config
         self.phonemeEmbedding = phonemeEmbedding
         self.featureProjection = featureProjection
@@ -114,6 +116,7 @@ public struct AcousticWeights: Sendable, Codable, Equatable {
         self.decoderNorm = decoderNorm
         self.melProjection = melProjection
         self.melBias = melBias
+        self.style = style
     }
 
     public var parameterCount: Int {
@@ -122,6 +125,7 @@ public struct AcousticWeights: Sendable, Codable, Equatable {
         n += encoder.parameterCount + decoder.parameterCount
         n += durationHead.parameterCount + pitchHead.parameterCount + energyHead.parameterCount
         n += pitchProjection.w.count * 2 + energyProjection.w.count * 2 + positionProjection.w.count * 2
+        n += style?.parameterCount ?? 0
         return n
     }
 }

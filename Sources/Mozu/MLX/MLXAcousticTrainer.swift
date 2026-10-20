@@ -11,17 +11,20 @@ public struct AcousticLosses: Sendable {
     public var duration: Float = 0
     public var pitch: Float = 0
     public var energy: Float = 0
+    /// 潜在変数の KL（free bits 適用前、次元の合計。style が無ければ 0）
+    public var kl: Float = 0
 
     public static func + (a: AcousticLosses, b: AcousticLosses) -> AcousticLosses {
-        return AcousticLosses(total: a.total + b.total, mel: a.mel + b.mel, duration: a.duration + b.duration, pitch: a.pitch + b.pitch, energy: a.energy + b.energy)
+        return AcousticLosses(total: a.total + b.total, mel: a.mel + b.mel, duration: a.duration + b.duration, pitch: a.pitch + b.pitch, energy: a.energy + b.energy, kl: a.kl + b.kl)
     }
 
     public func scaled(_ s: Float) -> AcousticLosses {
-        return AcousticLosses(total: total * s, mel: mel * s, duration: duration * s, pitch: pitch * s, energy: energy * s)
+        return AcousticLosses(total: total * s, mel: mel * s, duration: duration * s, pitch: pitch * s, energy: energy * s, kl: kl * s)
     }
 
     public var description: String {
-        return String(format: "total %.4f (mel %.4f, dur %.4f, pitch %.4f, energy %.4f)", total, mel, duration, pitch, energy)
+        let base = String(format: "total %.4f (mel %.4f, dur %.4f, pitch %.4f, energy %.4f", total, mel, duration, pitch, energy)
+        return base + (kl == 0 ? ")" : String(format: ", kl %.3f)", kl))
     }
 
     /// 採択に使う値（Mel とピッチ。継続時間は過学習しやすく、採択基準に入れると Mel の学習を捨ててしまう）
@@ -41,7 +44,27 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
     public var gradientClip: Float = 5.0
     /// 学習時にラベルを未指定 (0) に置き換える確率。ラベル無しの合成でも破綻しないようにする
     public var labelDropout: Float = 0.1
+    /// 種類ごとの置き換え確率（labelDropout より優先）
+    ///
+    /// なぜ種類ごとに変えるか: 話者のように他のラベル（口調など）と完全に結び付いた種類は、それだけで話し方を説明できてしまい、
+    /// 他の種類の埋め込みが育たない。その種類を高い確率で伏せると、伏せた間は他のラベルで説明するしかなくなる。
+    public var labelDropoutByKind: [String: Float] = [:]
     public private(set) var lastGradientNorm: Float = 0
+    /// 潜在変数の KL の重み（学習ループが徐々に上げる）
+    public var klWeight: Float = 0
+    /// 潜在変数の次元ごとの最低情報量（nats）。これ未満の KL には罰を与えず、次元が使われなくなるのを防ぐ
+    public var freeBits: Float = 0.1
+    /// 学習時に潜在変数を 0 に伏せる確率。参照なし（z = 0）の合成を学習済みの状態にするため
+    public var styleDropout: Float = 0.2
+    /// 直近のバッチの次元ごとの KL（ログ用）
+    public private(set) var lastKLPerDim: [Float] = []
+
+    /// 潜在変数の扱い: train は分布から引いて一部を伏せる、posterior は平均を使う、prior は 0（参照なし）
+    public enum LatentMode {
+        case train
+        case posterior
+        case prior
+    }
 
     public init(model: MLXAcousticModel, learningRate: Float) {
         self.model = model
@@ -55,7 +78,7 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
 
     /// サンプル列をバッチにまとめる（詰め物とマスク）
     /// `mels` を与えると各サンプルの Mel の代わりに使う（遅延読み込み）
-    public func makeBatch(_ samples: [UtteranceSample], mels: [[[Float]]]? = nil, dropLabels: Bool, rng: inout SystemRandomNumberGenerator) -> MLXAcousticModel.Batch {
+    public func makeBatch(_ samples: [UtteranceSample], mels: [[[Float]]]? = nil, dropLabels: Bool, latent: LatentMode = .posterior, rng: inout SystemRandomNumberGenerator) -> MLXAcousticModel.Batch {
         let cfg = model.config
         let b = samples.count
         let p = samples.map { $0.phoneCount }.max() ?? 1
@@ -63,6 +86,7 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
         let f = cfg.featureCount
         let melDim = cfg.melChannels
         let k = cfg.labelKinds.count
+        let dropRates = cfg.labelKinds.map { labelDropoutByKind[$0] ?? labelDropout }
         var ids = [Int32](repeating: 0, count: b * p)
         var feats = [Float](repeating: 0, count: b * p * f)
         var labels = [Int32](repeating: 0, count: b * k)
@@ -97,7 +121,7 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
             var kk = 0
             while kk < k {
                 var idx = kk < s.labelIndices.count ? s.labelIndices[kk] : 0
-                if dropLabels && Float.random(in: 0..<1, using: &rng) < labelDropout {
+                if dropLabels && Float.random(in: 0..<1, using: &rng) < dropRates[kk] {
                     idx = 0
                 }
                 labels[i * k + kk] = Int32(idx)
@@ -148,13 +172,21 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
             position: MLXArray(position, [b, t, 1]),
             frameMask: MLXArray(frameMask, [b, t, 1]),
             mel: MLXArray(mel, [b, t, melDim]),
+            styleMask: MLXArray((0..<b).map { _ -> Float in
+                switch latent {
+                case .train: return Float.random(in: 0..<1, using: &rng) < styleDropout ? 0 : 1
+                case .posterior: return 1
+                case .prior: return 0
+                }
+            }, [b, 1, 1]),
+            sampleLatent: latent == .train,
             batchSize: b,
             phoneCount: p,
             frameCount: t
         )
     }
 
-    /// マスク付き損失 [total, mel, dur, pitch, energy]
+    /// マスク付き損失 [total, mel, dur, pitch, energy, kl, kl の次元ごと]
     func losses(_ m: MLXAcousticModel, _ batch: MLXAcousticModel.Batch) -> [MLXArray] {
         let pred = m.forward(batch)
         let frameCount = maximum(sum(batch.frameMask), MLXArray(Float(1)))
@@ -166,8 +198,16 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
         // デコーダの条件を乱すことを防ぐため（有声音素だけで学習すると無声音素の予測が自由になる）
         let pitchLoss = (sum(square(pred.pitch - batch.pitch) * batch.voicedMask) + 0.2 * sum(square(pred.pitch - batch.pitch) * (batch.phoneMask - batch.voicedMask))) / voicedCount
         let energyLoss = sum(square(pred.energy - batch.energy) * batch.phoneMask) / phoneCount
-        let total = melLoss * melWeight + durLoss * durationWeight + pitchLoss * pitchWeight + energyLoss * energyWeight
-        return [total, melLoss, durLoss, pitchLoss, energyLoss]
+        var total = melLoss * melWeight + durLoss * durationWeight + pitchLoss * pitchWeight + energyLoss * energyWeight
+        var kl = MLXArray(Float(0))
+        var klPerDim = MLXArray.zeros([1])
+        if let mu = pred.latentMean, let logVar = pred.latentLogVar {
+            // KL(q(z|mel) || N(0, I)) を次元ごとにバッチ平均し、free bits 未満は罰しない
+            klPerDim = mean(0.5 * (square(mu) + exp(logVar) - 1.0 - logVar), axis: 0)
+            kl = sum(klPerDim)
+            total = total + klWeight * sum(maximum(klPerDim, MLXArray(freeBits)))
+        }
+        return [total, melLoss, durLoss, pitchLoss, energyLoss, kl, klPerDim]
     }
 
     /// 1 バッチの更新
@@ -182,6 +222,7 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
         // なぜここで optimizer も評価するか: Adam の step 等が未評価のまま連鎖すると Metal の資源上限で落ちる
         eval(model, optimizer, values, norm)
         lastGradientNorm = norm.item(Float.self)
+        lastKLPerDim = values[6].asArray(Float.self)
         return Self.toLosses(values)
     }
 
@@ -193,7 +234,7 @@ public final class MLXAcousticTrainer: @unchecked Sendable {
     }
 
     static func toLosses(_ v: [MLXArray]) -> AcousticLosses {
-        return AcousticLosses(total: v[0].item(Float.self), mel: v[1].item(Float.self), duration: v[2].item(Float.self), pitch: v[3].item(Float.self), energy: v[4].item(Float.self))
+        return AcousticLosses(total: v[0].item(Float.self), mel: v[1].item(Float.self), duration: v[2].item(Float.self), pitch: v[3].item(Float.self), energy: v[4].item(Float.self), kl: v[5].item(Float.self))
     }
 }
 

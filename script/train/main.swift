@@ -8,6 +8,7 @@ import Mozu
 ///   acoustic  音響モデルを学習する
 ///   vocoder   ボコーダを学習する
 ///   lexicon   既存の重み（旧形式も可）から語彙を取り込む
+///   styles    話し方の潜在変数を学習データで分類し、合成で選べる代表点を重みに保存する
 func printUsage() {
     print("""
     Usage:
@@ -15,6 +16,8 @@ func printUsage() {
       train acoustic -d <corpus> [-d <corpus> ...] -o <out.json> [-w <in.json>] [-e <epochs>] [--batch <n>] [--lr <lr>] [...]
       train vocoder  -d <corpus> [-d <corpus> ...] -o <out.json> [-w <in.json>] [-e <epochs>] [--batch <n>] [--lr <lr>] [...]
       train lexicon  --from <weights.json> -o <out.json> [-w <in.json>]
+      train styles   -d <corpus> [-d <corpus> ...] -w <in.json> -o <out.json> [--clusters 12] [--samples 20000]
+      train acoustic ... --style [--kl-weight 0.001] [--free-bits 0.1] [--kl-warmup 5000] [--style-dropout 0.2]   話し方の潜在変数つき
     """)
 }
 
@@ -36,6 +39,8 @@ case "vocoder":
     exit(TrainCommands.runVocoder(rest))
 case "lexicon":
     exit(TrainCommands.runLexicon(rest))
+case "styles":
+    exit(TrainCommands.runStyles(rest))
 case "--help", "-h", "help":
     printUsage()
     exit(0)

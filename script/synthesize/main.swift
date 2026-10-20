@@ -11,6 +11,8 @@ func printUsage() {
            synthesize -w <weights.json> --voices
       -v        ラベルの値をカンマ区切りで並べる（例: female,ギャル,age=10代後半）。"=" の無い値は種類を自動で探す
       --voices  重みが知っているラベルの種類と値を一覧する
+      --intonation 1.0  抑揚の倍率（0.5〜2.0）  --energy 0.0  声の張り（-2〜2、学習データの標準偏差単位）
+      --style <名前>       話し方のクラスタ（--voices で一覧）  --style-ref <wav>  参照音声の話し方をまねる
     """)
 }
 
@@ -23,6 +25,10 @@ var speed: Float = 1.0
 var pitch: Float = 1.0
 var melOutPath: String? = nil
 var listVoices = false
+var styleName: String? = nil
+var styleRef: String? = nil
+var intonation: Float = 1.0
+var energy: Float = 0.0
 
 let args = CommandLine.arguments
 var i = 1
@@ -54,6 +60,14 @@ while i < args.count {
         melOutPath = next()
     case "--voices":
         listVoices = true
+    case "--style":
+        styleName = next()
+    case "--style-ref":
+        styleRef = next()
+    case "--intonation":
+        intonation = Float(next() ?? "1") ?? 1.0
+    case "--energy":
+        energy = Float(next() ?? "0") ?? 0.0
     case "--help", "-h":
         printUsage()
         exit(0)
@@ -86,14 +100,36 @@ if listVoices {
         let values = labels.values[kind] ?? []
         print("\(kind)（\(values.count) 種）: " + values.joined(separator: ", "))
     }
+    if let clusters = engine.weights.acoustic?.style?.clusters, clusters.isEmpty != true {
+        print("話し方（--style）:")
+        for c in clusters {
+            print("  \(c.name)（\(c.count) 発話）: " + c.characteristic.joined(separator: ", "))
+        }
+    }
     exit(0)
 }
-let voice: VoiceProfile
+var voice: VoiceProfile
 do {
     voice = try engine.voice(named: voiceName)
+    voice.intonation = intonation
+    voice.energy = energy
 } catch {
     print("エラー: 声の指定を解釈できません: \(error)")
     exit(1)
+}
+if let name = styleName {
+    guard let z = engine.styleLatent(named: name) else {
+        print("エラー: 話し方「\(name)」はありません（--voices で一覧できます）。")
+        exit(1)
+    }
+    voice.latent = z
+}
+if let path = styleRef {
+    guard let pcm = try? WavAudioReader().loadWav16k(from: path), let z = engine.styleLatent(reference: pcm) else {
+        print("エラー: 参照音声から話し方を取り出せません（音声が読めないか、重みに話し方がありません）: \(path)")
+        exit(1)
+    }
+    voice.latent = z
 }
 var samples: [Float] = []
 let started = Date()

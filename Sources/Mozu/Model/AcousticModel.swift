@@ -29,12 +29,17 @@ public final class AcousticModel: @unchecked Sendable {
     /// phonemeIds: 音素 ID 列（文頭・文末の無音を含む）、features: [phoneCount][featureCount]、
     /// labelIndices: config.labelKinds の順のラベル index（0 = 未指定）
     /// speed: 話速倍率、pitchShift: オクターブ単位のピッチ移動、durations: 与えると継続時間予測を使わない
+    /// intonation: 抑揚の倍率（発話内の平均からのピッチのずれを拡大・縮小）、energyShift: エネルギーの移動（学習データの標準偏差単位）
+    /// latent: 話し方の潜在変数 z（style を持つ重みのみ。nil / 0 で平均的な話し方）
     public func synthesize(
         phonemeIds: [Int],
         features: [[Float]],
         labelIndices: [Int],
         speed: Float = 1.0,
         pitchShift: Float = 0.0,
+        intonation: Float = 1.0,
+        energyShift: Float = 0.0,
+        latent: [Float]? = nil,
         durations: [Int]? = nil,
         maxLeadSilenceFrames: Int = 8,
         maxTrailSilenceFrames: Int = 12
@@ -48,9 +53,13 @@ public final class AcousticModel: @unchecked Sendable {
         precondition(features.count == phoneCount)
         precondition(labelIndices.count == cfg.labelKinds.count)
 
-        // 1. 音素埋め込み + 特徴射影 + ラベル埋め込み
+        // 1. 音素埋め込み + 特徴射影 + ラベル埋め込み + 話し方の潜在変数
         var x = [Float](repeating: 0.0, count: phoneCount * d)
-        var style = [Float](repeating: 0.0, count: d)
+        var latentStyle = [Float](repeating: 0.0, count: d)
+        if let styleWeights = weights.style, let z = latent {
+            latentStyle = StyleEncoder.styleVector(styleWeights, latent: z, modelDim: d)
+        }
+        var style = latentStyle
         var k = 0
         while k < cfg.labelKinds.count {
             let table = weights.labelEmbeddings[k]
@@ -93,9 +102,22 @@ public final class AcousticModel: @unchecked Sendable {
         HawkStack.rmsNorm(h, weights.encoderNorm.values, &normed, frames: phoneCount, width: d)
 
         // 3. 継続時間・ピッチ・エネルギー
-        let logDur = Self.head(weights.durationHead, normed, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
+        // 継続時間ヘッドには潜在変数を直接も足す（学習時はエンコーダ出力の勾配を止めているので、話す速さを z から読めるように）
+        var durationInput = normed
+        if weights.style != nil {
+            var p = 0
+            while p < phoneCount {
+                var c = 0
+                while c < d {
+                    durationInput[p * d + c] += latentStyle[c]
+                    c += 1
+                }
+                p += 1
+            }
+        }
+        let logDur = Self.head(weights.durationHead, durationInput, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
         var pitchZ = Self.head(weights.pitchHead, normed, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
-        let energyZ = Self.head(weights.energyHead, normed, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
+        var energyZ = Self.head(weights.energyHead, normed, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
         // 無声化母音など F0 教師の無い音素は損失でマスクされ予測値が定まらないので、学習時の分布（±3σ）に収める
         var i = 0
         while i < pitchZ.count {
@@ -105,6 +127,7 @@ public final class AcousticModel: @unchecked Sendable {
             }
             i += 1
         }
+        Self.adjustProsody(pitchZ: &pitchZ, energyZ: &energyZ, phonemeIds: phonemeIds, intonation: intonation, energyShift: energyShift)
         var frameCounts: [Int] = []
         switch durations {
         case .some(let given) where given.count == phoneCount:
@@ -184,6 +207,35 @@ public final class AcousticModel: @unchecked Sendable {
     }
 
     /// Linear → GeLU → Linear（スカラー出力）
+    /// 抑揚とエネルギーの調整。抑揚は無音・ポーズを除く音素の平均ピッチを中心に拡大・縮小する
+    static func adjustProsody(pitchZ: inout [Float], energyZ: inout [Float], phonemeIds: [Int], intonation: Float, energyShift: Float) {
+        if intonation != 1.0 {
+            var sum: Float = 0
+            var count = 0
+            var p = 0
+            while p < pitchZ.count {
+                if phonemeIds[p] != PhonemeVocabulary.silId && phonemeIds[p] != PhonemeVocabulary.pauId {
+                    sum += pitchZ[p]
+                    count += 1
+                }
+                p += 1
+            }
+            let mean = 0 < count ? sum / Float(count) : 0
+            p = 0
+            while p < pitchZ.count {
+                pitchZ[p] = min(3.5, max(-3.5, mean + (pitchZ[p] - mean) * intonation))
+                p += 1
+            }
+        }
+        if energyShift != 0.0 {
+            var p = 0
+            while p < energyZ.count {
+                energyZ[p] += energyShift
+                p += 1
+            }
+        }
+    }
+
     static func head(_ w: HeadWeights, _ x: [Float], frames: Int, inDim: Int, hidden: Int) -> [Float] {
         var h = [Float](repeating: 0.0, count: frames * hidden)
         var t = 0

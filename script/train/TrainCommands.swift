@@ -21,6 +21,14 @@ enum TrainCommands {
         var vocoderLayers: Int = 6
         var validationEvery: Int = 20
         var labelDropout: Float = 0.1
+        var labelDropoutByKind: [String: Float] = [:]
+        var style: Bool = false
+        var klWeight: Float? = nil
+        var freeBits: Float? = nil
+        var klWarmup: Int? = nil
+        var styleDropout: Float? = nil
+        var clusters: Int = 12
+        var samples: Int = 20000
         var seed: UInt64 = 2026
         var maxFrames: Int = 2000
         var noAccentLearning: Bool = false
@@ -55,7 +63,22 @@ enum TrainCommands {
                 case "--decoder-layers": a.decoderLayers = Int(value() ?? "") ?? a.decoderLayers
                 case "--vocoder-layers": a.vocoderLayers = Int(value() ?? "") ?? a.vocoderLayers
                 case "--valid-every": a.validationEvery = Int(value() ?? "") ?? a.validationEvery
-                case "--label-dropout": a.labelDropout = Float(value() ?? "") ?? a.labelDropout
+                case "--style": a.style = true
+                case "--clusters": a.clusters = Int(value() ?? "") ?? a.clusters
+                case "--samples": a.samples = Int(value() ?? "") ?? a.samples
+                case "--kl-weight": a.klWeight = Float(value() ?? "")
+                case "--free-bits": a.freeBits = Float(value() ?? "")
+                case "--kl-warmup": a.klWarmup = Int(value() ?? "")
+                case "--style-dropout": a.styleDropout = Float(value() ?? "")
+                case "--label-dropout":
+                    // "0.1" で全種類、"speaker=0.5" で種類ごと（複数回指定できる）
+                    let text = value() ?? ""
+                    let kv = text.split(separator: "=", maxSplits: 1).map { String($0) }
+                    if kv.count == 2, let rate = Float(kv[1]) {
+                        a.labelDropoutByKind[kv[0]] = rate
+                    } else {
+                        a.labelDropout = Float(text) ?? a.labelDropout
+                    }
                 case "--seed": a.seed = UInt64(value() ?? "") ?? a.seed
                 case "--max-frames": a.maxFrames = Int(value() ?? "") ?? a.maxFrames
                 case "--no-accent-learning": a.noAccentLearning = true
@@ -175,6 +198,12 @@ enum TrainCommands {
             options.warmupSteps = a.warmup
             options.validationEvery = a.validationEvery
             options.labelDropout = a.labelDropout
+            options.labelDropoutByKind = a.labelDropoutByKind
+            options.useStyle = a.style
+            if let v = a.klWeight { options.klWeight = v }
+            if let v = a.freeBits { options.freeBits = v }
+            if let v = a.klWarmup { options.klWarmupSteps = v }
+            if let v = a.styleDropout { options.styleDropout = v }
             options.seed = a.seed
             options.maxBatchFrames = a.maxBatchFrames
             let config = AcousticDefaults.config(labelKinds: weights.labels.kinds, modelDim: a.modelDim, encoderLayers: a.encoderLayers, decoderLayers: a.decoderLayers)
@@ -227,6 +256,53 @@ enum TrainCommands {
         }
         print("  学習サンプルのアクセント特徴を再計算しました: \(replaced)/\(samples.count) 件")
         return rebuilt
+    }
+
+    /// 話し方の潜在変数を学習データで分類し、合成で選べる代表点を重みに保存する（CPU）
+    static func runStyles(_ args: [String]) -> Int32 {
+        guard let a = Args.parse(args), let corpora = loadCorpora(a), let input = a.input, let out = a.output else {
+            print("styles: -d <corpus>、-w <in.json>（話し方を持つ重み）、-o <out.json> が必要です。")
+            return 1
+        }
+        do {
+            var weights = try MozuWeights.load(from: URL(fileURLWithPath: input))
+            guard var style = weights.acoustic?.style else {
+                print("styles: 重みに話し方（参照エンコーダ）がありません。train acoustic --style で学習してください。")
+                return 1
+            }
+            let all = corpora.flatMap { $0.utterances }
+            let stride = max(1, all.count / max(1, a.samples))
+            let chosen = all.enumerated().filter { $0.offset % stride == 0 }.map { $0.element }.prefix(a.samples)
+            print("\(chosen.count) 発話の話し方の潜在変数を求めています...")
+            let latents = StyleClustering.latents(of: Array(chosen), style: style)
+            var points: [[Float]] = []
+            var labels: [[String: String]] = []
+            for (u, z) in zip(chosen, latents) {
+                if let z = z {
+                    points.append(z)
+                    labels.append(u.labels)
+                }
+            }
+            let k = min(a.clusters, points.count)
+            let (centroids, assignment) = StyleClustering.kMeans(points, k: k)
+            let traits = StyleClustering.characteristics(assignment: assignment, labels: labels, k: k)
+            let counts = (0..<k).map { c in assignment.filter { $0 == c }.count }
+            // 大きいまとまりから style1, style2, … と名前を付ける
+            let order = (0..<k).sorted { counts[$0] > counts[$1] }
+            style.clusters = order.enumerated().map { rank, c in
+                StyleCluster(name: "style\(rank + 1)", latent: centroids[c], count: counts[c], characteristic: traits[c])
+            }
+            for cluster in style.clusters {
+                print("  \(cluster.name)（\(cluster.count) 発話）: " + cluster.characteristic.joined(separator: ", "))
+            }
+            weights.acoustic?.style = style
+            try weights.save(to: URL(fileURLWithPath: out))
+            print("話し方 \(style.clusters.count) 種を \(out) に保存しました。")
+            return 0
+        } catch {
+            print("styles: 失敗しました: \(error)")
+            return 1
+        }
     }
 
     static func runVocoder(_ args: [String]) -> Int32 {
