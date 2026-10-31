@@ -160,4 +160,45 @@ final class LinguisticTests: XCTestCase {
         XCTAssertTrue(surfaces.contains("水"), "漢字語も従来どおり獲得すること")
         XCTAssertTrue(surfaces.contains("ア") != true, "1 文字のカタカナは獲得しないこと")
     }
+
+    // MARK: - 8. 語彙に無いひらがな列
+
+    /// 語彙に無いひらがなの拗音は前の文字と合わせて 1 拍で読み、1 文字ずつ別の語に分けない
+    func testUnknownHiraganaKeepsContractedSounds() {
+        let builder = PhonemeSequenceBuilder(normalizer: normalizer, prosodyModel: prosodyModel, vocabulary: vocabulary)
+        func symbols(_ text: String) -> [String] {
+            return builder.build(text: text).tokens.map { $0.symbol }.filter { $0 != "<sil>" }
+        }
+        XCTAssertEqual(symbols("おっしゃー"), ["o", "Q", "sh", "a", "_"])
+        XCTAssertEqual(symbols("しゃ"), ["sh", "a"])
+        // 1 語として 1 つのアクセント句になる（拍ごとに句頭にならない）
+        let phraseStarts = builder.build(text: "おっしゃー").features.filter { $0[3] == 1 }.count
+        XCTAssertEqual(phraseStarts, 1)
+        // 小書き文字から始まる形態素を作らない
+        for text in ["ちょっとまって", "いらっしゃい", "しゃべりすぎ"] {
+            let small: Set<Character> = ["ゃ", "ゅ", "ょ"]
+            XCTAssertFalse(normalizer.normalize(text: text).contains { $0.surface.first.map { small.contains($0) } ?? false }, text)
+        }
+    }
+
+    /// 語の境界をまたいだ連結語は取り除き、複合語は残す。かなを含む語どうしは連結して獲得しない
+    func testLexiconLearningDropsWordsJoinedAcrossBoundaries() {
+        let cost = ViterbiMorphology.learnedLexiconCost
+        let existing = [
+            LexiconEntry(surface: "遠足", reading: "えんそく", pos: .noun, accentKernel: 0, cost: cost),
+            LexiconEntry(surface: "行け", reading: "いけ", pos: .noun, accentKernel: 0, cost: cost),
+            LexiconEntry(surface: "遠足行け", reading: "えんそくいけ", pos: .noun, accentKernel: 1, cost: cost),
+            LexiconEntry(surface: "夏", reading: "なつ", pos: .noun, accentKernel: 2, cost: cost),
+            LexiconEntry(surface: "休み", reading: "やすみ", pos: .noun, accentKernel: 3, cost: cost),
+            LexiconEntry(surface: "夏休み", reading: "なつやすみ", pos: .noun, accentKernel: 3, cost: cost),
+        ]
+        let result = ViterbiMorphology.learnLexiconEntries(sentences: [], existing: existing)
+        let surfaces = Set(result.lexicon.map { $0.surface })
+        XCTAssertFalse(surfaces.contains("遠足行け"))
+        XCTAssertTrue(surfaces.contains("夏休み"))
+        XCTAssertEqual(result.removed, 1)
+
+        let learned = ViterbiMorphology.learnLexiconEntries(sentences: ["明日は遠足行けないから寂しい。"], existing: [])
+        XCTAssertFalse(learned.lexicon.contains { $0.surface.hasPrefix("遠足") && $0.surface.count > 2 }, "かなを含む語どうしを連結しない")
+    }
 }

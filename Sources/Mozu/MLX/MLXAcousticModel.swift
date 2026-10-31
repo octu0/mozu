@@ -180,6 +180,11 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         public let styleMask: MLXArray
         /// 潜在変数を分布から引く（学習）か平均を使う（検証）か
         public let sampleLatent: Bool
+        /// Mel の識別器に見せる切り出し: 各発話から segmentFrames フレームを取る [B·S] int32（[B·T] の行への index）と、
+        /// その有効フレーム [B, S, 1]（発話が短いと末尾は無効）
+        public let segmentIndex: MLXArray
+        public let segmentMask: MLXArray
+        public let segmentFrames: Int
         public let batchSize: Int
         public let phoneCount: Int
         public let frameCount: Int
@@ -190,6 +195,8 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         public let logDurations: MLXArray   // [B, P, 1]
         public let pitch: MLXArray          // [B, P, 1]
         public let energy: MLXArray         // [B, P, 1]
+        /// 音素のエンコーダ出力 [B, P, D]（抑揚の識別器の条件に使う）
+        public let encoded: MLXArray
         /// 潜在変数の平均・対数分散 [B, latentDim]（style が無ければ nil）
         public let latentMean: MLXArray?
         public let latentLogVar: MLXArray?
@@ -236,7 +243,7 @@ public final class MLXAcousticModel: Module, @unchecked Sendable {
         frames = frames + positionProjection(batch.position)
         let decoded = hawkRMSNorm(decoder(frames, frameMask: batch.frameMask), decoderNorm)
         let mel = matmul(decoded, melProjection) + melBias
-        return Prediction(mel: mel, logDurations: logDurations, pitch: pitch, energy: energy, latentMean: latentMean, latentLogVar: latentLogVar)
+        return Prediction(mel: mel, logDurations: logDurations, pitch: pitch, energy: energy, encoded: encoded, latentMean: latentMean, latentLogVar: latentLogVar)
     }
 }
 #endif

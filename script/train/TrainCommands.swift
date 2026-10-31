@@ -27,6 +27,9 @@ enum TrainCommands {
         var freeBits: Float? = nil
         var klWarmup: Int? = nil
         var styleDropout: Float? = nil
+        var advWeight: Float? = nil
+        var fmWeight: Float? = nil
+        var advWarmup: Int? = nil
         var clusters: Int = 12
         var samples: Int = 20000
         var seed: UInt64 = 2026
@@ -37,6 +40,17 @@ enum TrainCommands {
         var segmentFrames: Int = 96
         var lazyMel: Bool = false
         var maxBatchFrames: Int = 12000
+        var validIDs: String? = nil
+        var models: [String] = []
+        var evalSet: String? = nil
+        var count: Int = 200
+        var groupBy: [String] = ["corpus", "gender"]
+        var posterior: Bool = false
+        var intonation: Float = 1.0
+        var melGAN: Bool = false
+        var melAdvWeight: Float? = nil
+        var melFmWeight: Float? = nil
+        var maxSteps: Int? = nil
 
         static func parse(_ args: [String]) -> Args? {
             var a = Args()
@@ -64,6 +78,9 @@ enum TrainCommands {
                 case "--vocoder-layers": a.vocoderLayers = Int(value() ?? "") ?? a.vocoderLayers
                 case "--valid-every": a.validationEvery = Int(value() ?? "") ?? a.validationEvery
                 case "--style": a.style = true
+                case "--adv-weight": a.advWeight = Float(value() ?? "")
+                case "--fm-weight": a.fmWeight = Float(value() ?? "")
+                case "--adv-warmup": a.advWarmup = Int(value() ?? "")
                 case "--clusters": a.clusters = Int(value() ?? "") ?? a.clusters
                 case "--samples": a.samples = Int(value() ?? "") ?? a.samples
                 case "--kl-weight": a.klWeight = Float(value() ?? "")
@@ -87,6 +104,17 @@ enum TrainCommands {
                 case "--max-batch-frames": a.maxBatchFrames = Int(value() ?? "") ?? a.maxBatchFrames
                 case "--gan-start": a.ganStartEpoch = Int(value() ?? "") ?? a.ganStartEpoch
                 case "--segment-frames": a.segmentFrames = Int(value() ?? "") ?? a.segmentFrames
+                case "--valid-ids": a.validIDs = value()
+                case "-m", "--model": if let v = value() { a.models.append(v) }
+                case "--set": a.evalSet = value()
+                case "--posterior": a.posterior = true
+                case "--mel-gan": a.melGAN = true
+                case "--mel-adv-weight": a.melAdvWeight = Float(value() ?? "")
+                case "--mel-fm-weight": a.melFmWeight = Float(value() ?? "")
+                case "--max-steps": a.maxSteps = Int(value() ?? "")
+                case "--intonation": a.intonation = Float(value() ?? "") ?? a.intonation
+                case "--count": a.count = Int(value() ?? "") ?? a.count
+                case "--by": a.groupBy = (value() ?? "").split(separator: ",").map { String($0) }
                 default:
                     print("不明な引数: \(args[i])")
                     return nil
@@ -111,7 +139,7 @@ enum TrainCommands {
         }
         let learned = ViterbiMorphology.learnLexiconEntries(sentences: sentences, existing: weights.lexicon, readings: readings)
         weights.lexicon = learned.lexicon
-        print("転写 \(learned.sentenceCount) 文から語彙を \(learned.added) 件獲得し、\(learned.updated) 件の読み・核の初期値を更新しました（語彙合計 \(weights.lexicon.count) 件）。")
+        print("転写 \(learned.sentenceCount) 文から語彙を \(learned.added) 件獲得し、\(learned.updated) 件の読み・核の初期値を更新し、語の境界をまたいだ連結語を \(learned.removed) 件取り除きました（語彙合計 \(weights.lexicon.count) 件）。")
         weights.labels.register(corpora: corpora)
         if weights.labels.kinds.isEmpty != true {
             let summary = weights.labels.kinds.map { "\($0) \(weights.labels.count(kind: $0) - 1) 種" }.joined(separator: ", ")
@@ -200,19 +228,32 @@ enum TrainCommands {
             options.labelDropout = a.labelDropout
             options.labelDropoutByKind = a.labelDropoutByKind
             options.useStyle = a.style
+            options.useAdversarial = a.gan
+            options.useMelAdversarial = a.melGAN
+            if let v = a.melAdvWeight { options.melAdversarialWeight = v }
+            if let v = a.melFmWeight { options.melFeatureMatchingWeight = v }
+            options.maxSteps = a.maxSteps
+            if let v = a.advWeight { options.adversarialWeight = v }
+            if let v = a.fmWeight { options.featureMatchingWeight = v }
+            if let v = a.advWarmup { options.adversarialWarmupSteps = v }
             if let v = a.klWeight { options.klWeight = v }
             if let v = a.freeBits { options.freeBits = v }
             if let v = a.klWarmup { options.klWarmupSteps = v }
             if let v = a.styleDropout { options.styleDropout = v }
             options.seed = a.seed
             options.maxBatchFrames = a.maxBatchFrames
+            if let path = a.validIDs {
+                let set = try JSONDecoder().decode(EvaluationSet.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+                options.validationIDs = set.ids
+                print("評価セット \(path) の \(set.entries.count) 発話を必ず検証側に回します。")
+            }
             let config = AcousticDefaults.config(labelKinds: weights.labels.kinds, modelDim: a.modelDim, encoderLayers: a.encoderLayers, decoderLayers: a.decoderLayers)
             let outURL = URL(fileURLWithPath: out)
             let result = AcousticTraining.run(samples: samples, labels: weights.labels, initial: weights.acoustic, config: config, options: options, log: { print($0) }) { best, epoch, losses in
                 weights.acoustic = best
                 do {
                     try weights.save(to: outURL)
-                    print("  ==> 最良更新: Epoch \(epoch) 採択値 \(String(format: "%.4f", losses.selection))。\(out) に保存しました。")
+                    print("  ==> 最良更新: Epoch \(epoch) 採択値 \(String(format: "%.4f", a.melGAN ? losses.fluxAwareSelection : (a.gan ? losses.rangeAwareSelection : losses.selection)))。\(out) に保存しました。")
                 } catch {
                     print("  保存に失敗しました: \(error)")
                 }

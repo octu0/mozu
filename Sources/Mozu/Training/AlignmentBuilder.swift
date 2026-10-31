@@ -76,6 +76,21 @@ public enum AlignmentBuilder {
         return (alignments, Statistics(loaded: loaded, built: alignments.count - loaded, skipped: skipped))
     }
 
+    /// キャッシュから、今の音素列と合う発話のアライメントだけを読む（作らない・保存しない）
+    ///
+    /// 発話の一部だけを持つコーパスでも使える（loadOrBuild に一部だけを渡すと、キャッシュがその一部で上書きされる）
+    public static func loadCached(corpus: Corpus, sequenceBuilder: PhonemeSequenceBuilder) throws -> [String: UtteranceAlignment] {
+        let cached = try AlignmentStore.load(from: corpus.alignmentPath)
+        var alignments: [String: UtteranceAlignment] = [:]
+        for u in corpus.utterances {
+            let body = bodyTokens(sequenceBuilder.build(text: u.text))
+            if let a = cached[u.id], a.phonemes.count == body.count, matches(a, body) {
+                alignments[u.id] = a
+            }
+        }
+        return alignments
+    }
+
     /// プロトタイプ学習に使う発話数の上限（これを超えるコーパスは分割して整列する）
     public static let modelSubsetSize = 4000
     /// 分割整列の 1 回分の発話数

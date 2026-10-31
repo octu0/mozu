@@ -11,6 +11,8 @@ public struct AcousticTrainingOptions: Sendable {
     public var warmupSteps: Int = 200
     /// 検証に回す発話の間隔（20 なら 20 件に 1 件）
     public var validationEvery: Int = 20
+    /// 間隔に関係なく必ず検証に回す発話 ID（評価セットを学習に使わないため）
+    public var validationIDs: Set<String> = []
     public var seed: UInt64 = 2026
     public var labelDropout: Float = 0.1
     /// 種類ごとのラベルの置き換え確率（例: ["speaker": 0.5]）。指定の無い種類は labelDropout
@@ -25,6 +27,19 @@ public struct AcousticTrainingOptions: Sendable {
     public var freeBits: Float = 0.1
     /// 潜在変数を伏せる確率
     public var styleDropout: Float = 0.2
+    /// 抑揚の識別器を使う（採択は rangeAwareSelection になる）
+    public var useAdversarial: Bool = false
+    /// 敵対的損失と特徴一致の重みの最大値と、そこまで上げるステップ数
+    public var adversarialWeight: Float = 0.1
+    public var featureMatchingWeight: Float = 0.1
+    public var adversarialWarmupSteps: Int = 1000
+    /// Mel の識別器を使う（採択は fluxAwareSelection になる）。重みの最大値と、そこまで上げるステップ数
+    public var useMelAdversarial: Bool = false
+    public var melAdversarialWeight: Float = 0.05
+    public var melFeatureMatchingWeight: Float = 0.2
+    public var melAdversarialWarmupSteps: Int = 500
+    /// 学習するステップ数の上限（試しの学習用。学習率の計画もこの長さで組む）
+    public var maxSteps: Int? = nil
     public var logEvery: Int = 50
     /// 1 バッチの詰め物込み総フレーム数の上限（メモリの山を抑える）
     public var maxBatchFrames: Int = 12000
@@ -108,6 +123,14 @@ public enum AcousticTraining {
         let trainer = MLXAcousticTrainer(model: model, learningRate: options.learningRateMin)
         trainer.freeBits = options.freeBits
         trainer.styleDropout = options.styleDropout
+        if options.useAdversarial {
+            trainer.enableProsodyDiscriminator(MLXProsodyDiscriminator(modelDim: effectiveConfig.modelDim), learningRate: options.learningRateMax)
+            log("抑揚の識別器を使います（敵対的 \(options.adversarialWeight)、特徴一致 \(options.featureMatchingWeight)、\(options.adversarialWarmupSteps) ステップで最大）。採択は Mel と抑揚の幅の比で行います。")
+        }
+        if options.useMelAdversarial {
+            trainer.enableMelDiscriminator(MLXMelDiscriminator(), learningRate: options.learningRateMax)
+            log("Mel の識別器を使います（敵対的 \(options.melAdversarialWeight)、特徴一致 \(options.melFeatureMatchingWeight)、\(options.melAdversarialWarmupSteps) ステップで最大）。採択は Mel と時間方向の変化の比で行います。")
+        }
         trainer.labelDropout = options.labelDropout
         trainer.labelDropoutByKind = options.labelDropoutByKind
         if options.labelDropoutByKind.isEmpty != true {
@@ -118,7 +141,7 @@ public enum AcousticTraining {
         var valid: [UtteranceSample] = []
         var i = 0
         while i < samples.count {
-            if options.validationEvery > 0 && i % options.validationEvery == 0 {
+            if (options.validationEvery > 0 && i % options.validationEvery == 0) || options.validationIDs.contains(samples[i].id) {
                 valid.append(samples[i])
             } else {
                 train.append(samples[i])
@@ -129,7 +152,7 @@ public enum AcousticTraining {
             valid = Array(train.prefix(min(8, train.count)))
         }
         let stepsPerEpoch = BatchPlanner.plan(sampleFrames: train.map { $0.frameCount }, batchSize: options.batchSize, maxFrames: options.maxBatchFrames, rng: &rng).count
-        let totalSteps = stepsPerEpoch * options.epochs
+        let totalSteps = min(stepsPerEpoch * options.epochs, options.maxSteps ?? Int.max)
         let scheduler = CosineLRScheduler(lrMax: options.learningRateMax, lrMin: options.learningRateMin)
         log(String(format: "学習 %d 件 / 検証 %d 件、%d ステップ/エポック、%d エポック、ピッチ正規化 (%.3f, %.3f)、エネルギー正規化 (%.3f, %.3f)", train.count, valid.count, stepsPerEpoch, options.epochs, norm.pitchMean, norm.pitchStd, norm.energyMean, norm.energyStd))
 
@@ -143,10 +166,25 @@ public enum AcousticTraining {
             var recent = AcousticLosses()
             var recentCount = 0
             let started = Date()
+            var epochSteps = 0
             for indices in batches {
+                if totalSteps <= step {
+                    break
+                }
                 step += 1
+                epochSteps += 1
                 trainer.learningRate = scheduler.learningRate(step: step, totalSteps: totalSteps, warmupSteps: options.warmupSteps)
                 trainer.klWeight = options.klWeight * min(1.0, Float(step) / Float(max(1, options.klWarmupSteps)))
+                if options.useAdversarial {
+                    let ramp = min(1.0, Float(step) / Float(max(1, options.adversarialWarmupSteps)))
+                    trainer.adversarialWeight = options.adversarialWeight * ramp
+                    trainer.featureMatchingWeight = options.featureMatchingWeight * ramp
+                }
+                if options.useMelAdversarial {
+                    let ramp = min(1.0, Float(step) / Float(max(1, options.melAdversarialWarmupSteps)))
+                    trainer.melAdversarialWeight = options.melAdversarialWeight * ramp
+                    trainer.melFeatureMatchingWeight = options.melFeatureMatchingWeight * ramp
+                }
                 let chosen = indices.map { train[$0] }
                 let mels = chosen.contains { $0.mel.isEmpty } ? SampleBuilder.loadMels(samples: chosen) : nil
                 let batch = trainer.makeBatch(chosen, mels: mels, dropLabels: true, latent: .train, rng: &rng)
@@ -170,7 +208,7 @@ public enum AcousticTraining {
                     recentCount = 0
                 }
             }
-            let trainAverage = epochSum.scaled(1.0 / Float(max(1, batches.count)))
+            let trainAverage = epochSum.scaled(1.0 / Float(max(1, epochSteps)))
             // 検証（ラベルは落とさない）。潜在変数がある場合は z = 0（参照なし）で採択し、推定した z での値も併記する
             func validate(_ latent: MLXAcousticTrainer.LatentMode) -> AcousticLosses {
                 var validSum = AcousticLosses()
@@ -191,17 +229,21 @@ public enum AcousticTraining {
             let validPosterior: AcousticLosses? = model.style == nil ? nil : validate(.posterior)
             let elapsed = Date().timeIntervalSince(started)
             log(String(format: "[Epoch %d/%d] 学習 %@  (%.0f 秒, GPU ピーク %.1f GB)", epoch, options.epochs, trainAverage.description, elapsed, Double(GPU.peakMemory) / Double(1 << 30)))
-            log(String(format: "              検証 %@  採択値 %.4f", validAverage.description, validAverage.selection) + (model.style == nil ? "" : "（z = 0）"))
+            let selection = options.useMelAdversarial ? validAverage.fluxAwareSelection : (options.useAdversarial ? validAverage.rangeAwareSelection : validAverage.selection)
+            log(String(format: "              検証 %@  採択値 %.4f", validAverage.description, selection) + (model.style == nil ? "" : "（z = 0）"))
             if let posterior = validPosterior {
                 log("              検証（参照から推定した z） " + posterior.description)
             }
-            if validAverage.selection < bestSelection {
-                bestSelection = validAverage.selection
+            if selection < bestSelection {
+                bestSelection = selection
                 let weights = model.exportWeights(config: effectiveConfig)
                 best = weights
                 onBest(weights, epoch, validAverage)
             }
             epoch += 1
+            if totalSteps <= step {
+                break
+            }
         }
         return best
     }

@@ -211,6 +211,8 @@ public final class ViterbiMorphology: Sendable {
         public let added: Int
         /// 既存エントリのうち、読み（コーパスが与える読み）または核の初期値を更新した数
         public let updated: Int
+        /// 獲得済みの語のうち、語の境界をまたいだ連結語として取り除いた数
+        public let removed: Int
         /// 獲得元の文数
         public let sentenceCount: Int
     }
@@ -233,7 +235,10 @@ public final class ViterbiMorphology: Sendable {
     ///   カタカナ語・英字の語も獲得するのは、語彙に無い語にはアクセント学習の結果を記録できず、平板のままになるため
     /// - 英字の語の読みは綴りの規則による推定（EnglishReading.bestGuess）
     /// - readings（コーパスが与える表記 → 読み）にある語はその読みを使い、獲得済みの語の読みも置き換える
-    /// - 連続する漢字含有語の連結（複合語）も獲得し、Viterbi で最長一致が優先されるようにする
+    /// - 漢字だけの語が続く所は連結（複合語、天体望遠鏡 など）も獲得し、Viterbi で最長一致が優先されるようにする。
+    ///   かなを含む語はつながない（遠足＋行け、行く＋最も安価 のように語の境界をまたぎ、1 つの核で読まれるため）
+    /// - 獲得済みの漢字を含む語のうち、2 語の表記・読みをそのままつないだもので、今回の文からは 1 語として獲得されないものは取り除く
+    ///   （以前の規則で作った 遠足行け などの連結語。分かち書きが 1 語とする 夏休み などは残る）
     /// - 同一表記に複数の読みがある場合は出現頻度の高い読みを採用する
     /// - 既存語彙および基本語彙に同一表記（同一品詞）がある場合は上書きしない
     public static func learnLexiconEntries(
@@ -342,7 +347,8 @@ public final class ViterbiMorphology: Sendable {
                     // なぜ連結するか: 悪/わる + さ、良/よ + い のように単漢字の読みが文脈で変わる場合に、
                     // 表記「悪さ」「良い」を 1 語として持たせ、頻度多数決による誤読（悪→あく）を避けるため。
                     // 助詞・助動詞・記号は連結しない（は→わ などの助詞発音規則を壊さないため）。
-                    if (tIdx + 1) < tokens.count {
+                    // 1 文字の漢字に限る（電話＋ばかり のような 2 語の連結を作らないため）
+                    if (tIdx + 1) < tokens.count && isSingleKanji(tok.surface) {
                         let nextTok = tokens[tIdx + 1]
                         if containsKanji(nextTok.surface) != true && isHiraganaReading(nextTok.surface) {
                             switch inferPartOfSpeech(for: nextTok.surface) {
@@ -353,9 +359,18 @@ public final class ViterbiMorphology: Sendable {
                             }
                         }
                     }
-                    runSurface += tok.surface
-                    runReading += tok.reading
-                    runLength += 1
+                    if isKanjiOnly(tok.surface) {
+                        runSurface += tok.surface
+                        runReading += tok.reading
+                        runLength += 1
+                    } else {
+                        if 1 < runLength {
+                            record(surface: runSurface, reading: runReading)
+                        }
+                        runSurface = ""
+                        runReading = ""
+                        runLength = 0
+                    }
                 } else {
                     if isKatakanaWord(tok.surface) {
                         record(surface: tok.surface, reading: katakanaToHiragana(tok.surface))
@@ -377,6 +392,24 @@ public final class ViterbiMorphology: Sendable {
         var merged = baseList
         var added = 0
         var updated = 0
+        // 語の境界をまたいだ連結語を取り除く（短い語から順に判定し、残った語だけを部品として使う）
+        var removed = 0
+        var readingsBySurface: [String: Set<String>] = [:]
+        for entry in merged {
+            readingsBySurface[entry.surface, default: []].insert(entry.reading)
+        }
+        var drop = Set<Int>()
+        for index in merged.indices.sorted(by: { merged[$0].surface.count < merged[$1].surface.count }) {
+            let entry = merged[index]
+            if entry.cost == learnedLexiconCost && containsKanji(entry.surface) && readingCounts[entry.surface] == nil && isJoinedAcrossWords(entry.surface, entry.reading, readingsBySurface) {
+                drop.insert(index)
+                readingsBySurface[entry.surface]?.remove(entry.reading)
+                removed += 1
+            }
+        }
+        if drop.isEmpty != true {
+            merged = merged.indices.filter { drop.contains($0) != true }.map { merged[$0] }
+        }
         // コーパスが与える読み: 獲得済みの語は読みを置き換え（読みが変われば核は未知に戻す）、無い語は追加する
         var given: [String: String] = [:]
         for (surface, reading) in readings {
@@ -442,7 +475,61 @@ public final class ViterbiMorphology: Sendable {
             added += 1
         }
 
-        return LexiconLearningResult(lexicon: merged, added: added, updated: updated, sentenceCount: sentenceCount)
+        return LexiconLearningResult(lexicon: merged, added: added, updated: updated, removed: removed, sentenceCount: sentenceCount)
+    }
+
+    /// 2 語のつなぎ目が語の境界らしいか
+    ///
+    /// 前の語が活用した形・副詞の形で終わる（読める＋学生、行く＋前、特に＋山間部）、
+    /// または後ろの語がかなだけの語（など、だけ、これ）や活用の途中の形（吸っ、死ん、行け、座れ）。
+    /// 夏＋休み、生き＋方、町＋並み のような複合語の形は境界とみなさない
+    static func spansWordBoundary(head: String, tail: String) -> Bool {
+        let inflectedEnds: Set<Character> = ["る", "う", "く", "ぐ", "す", "つ", "ぬ", "ぶ", "む", "い", "た", "だ", "っ", "て", "で", "に", "な"]
+        let unfinishedEnds: Set<Character> = ["っ", "ん", "ら", "け", "れ", "え", "う", "く", "す", "つ", "む", "ぶ", "ぐ", "ぬ", "る", "わ", "ま", "い"]
+        if let last = head.last, isKanji(last) != true, inflectedEnds.contains(last) {
+            return true
+        }
+        if tail.allSatisfy({ isKanji($0) != true && $0 != "々" }) {
+            return true
+        }
+        if let last = tail.last, isKanji(last) != true, unfinishedEnds.contains(last) {
+            return true
+        }
+        return false
+    }
+
+    static func isKanjiOnly(_ s: String) -> Bool {
+        return s.isEmpty != true && s.allSatisfy { isKanji($0) || $0 == "々" }
+    }
+
+    static func isSingleKanji(_ s: String) -> Bool {
+        return s.count == 1 && isKanjiOnly(s)
+    }
+
+    /// 2 つの語の表記・読みをそのままつないだ語で、獲得の規則（漢字だけの複合語、1 文字の漢字＋送り仮名）に当たらないもの
+    ///
+    /// 読みがつないだものと違う語（連濁など）は 1 語として残す
+    static func isJoinedAcrossWords(_ surface: String, _ reading: String, _ readingsBySurface: [String: Set<String>]) -> Bool {
+        let chars = Array(surface)
+        if chars.count < 3 || isKanjiOnly(surface) {
+            return false
+        }
+        for cut in 1..<chars.count {
+            let head = String(chars[..<cut])
+            let tail = String(chars[cut...])
+            if isSingleKanji(head) && tail.allSatisfy({ isKanji($0) != true }) {
+                continue
+            }
+            guard let headReadings = readingsBySurface[head], let tailReadings = readingsBySurface[tail], spansWordBoundary(head: head, tail: tail) else {
+                continue
+            }
+            for h in headReadings where reading.hasPrefix(h) {
+                if tailReadings.contains(String(reading.dropFirst(h.count))) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// 文全体を日本語ロケールの単語単位で分かち書きし、各語の読み（ひらがな）を返す
@@ -546,6 +633,21 @@ public final class ViterbiMorphology: Sendable {
             kernel -= 1
         }
         return Int16(kernel)
+    }
+
+    /// 語彙に無いひらがな列を 1 語として扱う最大文字数
+    static let maxUnknownHiraganaLength = 8
+
+    /// 拗音・小書き母音（前の文字と合わせて 1 拍になる文字）
+    static func isSmallKana(_ c: Character) -> Bool {
+        return ["ゃ", "ゅ", "ょ", "ぁ", "ぃ", "ぅ", "ぇ", "ぉ", "ゎ", "ャ", "ュ", "ョ", "ァ", "ィ", "ゥ", "ェ", "ォ", "ヮ"].contains(c)
+    }
+
+    static func isHiraganaOrProlonged(_ c: Character) -> Bool {
+        guard let v = c.unicodeScalars.first?.value, c.unicodeScalars.count == 1 else {
+            return false
+        }
+        return (0x3041...0x3096).contains(v) || c == "ー"
     }
 
     /// 語彙照合で試す表記の最大文字数（長いカタカナ語・英字の語も一致させる）
@@ -694,10 +796,38 @@ public final class ViterbiMorphology: Sendable {
                 }
             }
 
+            // 語彙に無いひらがな列の一括ノード（区切り位置ごと）。1 文字ずつに分けると、
+            // 「しゃ」が「し」「ゃ」に割れて 2 拍で読まれ、さらに 1 文字ごとに別のアクセント句になるため。
+            // 語彙の語より高いコストにして、語彙で区切れる所は語彙を使う。小書き文字・長音の直前では切らない
+            if Self.isHiraganaOrProlonged(char) && Self.isSmallKana(char) != true {
+                var hEnd = pos + 1
+                while hEnd < charCount && hEnd - pos < Self.maxUnknownHiraganaLength && Self.isHiraganaOrProlonged(chars[hEnd]) {
+                    hEnd += 1
+                    if hEnd < charCount && (Self.isSmallKana(chars[hEnd]) || chars[hEnd] == "ー") {
+                        continue
+                    }
+                    let hLen = hEnd - pos
+                    let word = String(chars[pos..<hEnd])
+                    let runNode = LatticeNode(
+                        id: nextNodeId,
+                        startPos: pos,
+                        length: hLen,
+                        surface: word,
+                        reading: word,
+                        pos: .noun,
+                        accentKernel: 0,
+                        nodeCost: Int16(min(Int(Int16.max), 150 * hLen))
+                    )
+                    nodesStartingAt[pos].append(runNode)
+                    nextNodeId += 1
+                }
+            }
+
             // 1文字未知語ノードを常に生成（ラティス上の未到達孤立点を防止）
+            // 小書き文字で始まるノードは、前の文字と切り離して読むことになるので、ほぼ選ばれないコストにする
             let (unknownPos, unknownReading, unknownCost) = determineUnknownCharProperties(char)
             let singleStr = String(char)
-            let singleCost = Int(unknownCost) + 100
+            let singleCost = Int(unknownCost) + (Self.isSmallKana(char) ? 5000 : 100)
             let node = LatticeNode(
                 id: nextNodeId,
                 startPos: pos,

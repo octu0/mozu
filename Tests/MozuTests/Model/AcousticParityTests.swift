@@ -36,7 +36,9 @@ final class AcousticParityTests: XCTestCase {
         // CPU 推論は予測値を使う。そこでヘッドの出力が教師値と一致する入力ではなく、両者が同じ入力（予測値）を使う形で比較する。
         // CPU の出力 Mel を MLX と比べるには、MLX 側にも予測値を条件として与える必要があるので、
         // ここでは教師値 = 予測値 となるサンプルを作って比較する。
-        let predictedPitch = mlxPitch.map { $0 * config.pitchStd + config.pitchMean }
+        // CPU は無声子音・無音のピッチを学習時の教師（正規化 0）にそろえるので、MLX 側の教師も同じにする
+        let unvoiced: Set<Int32> = [1, 10]
+        let predictedPitch = zip(ids, mlxPitch).map { id, z in (unvoiced.contains(id) ? 0 : z) * config.pitchStd + config.pitchMean }
         let predictedEnergy = pred.energy.asArray(Float.self).map { $0 * config.energyStd + config.energyMean }
         let consistent = UtteranceSample(id: "x", text: "", phonemeIds: ids, features: features, labelIndices: [2], durations: durations, pitch: predictedPitch, voiced: [true, true, true, true, true, true], voicedFrames: [3, 3, 3, 3, 3, 3], energy: predictedEnergy, mel: mel, pcm: [])
         let batch2 = trainer.makeBatch([consistent], dropLabels: false, rng: &rng)
@@ -94,7 +96,8 @@ final class AcousticParityTests: XCTestCase {
             XCTAssertEqual(a, b, accuracy: 2e-3, "参照エンコーダの平均が一致しません")
         }
         // 予測ピッチ・エネルギーを教師に入れ直して、CPU（予測値を使う）と同じ条件で比べる
-        let predictedPitch = first.pitch.asArray(Float.self).map { $0 * config.pitchStd + config.pitchMean }
+        let unvoiced: Set<Int32> = [1, 10]
+        let predictedPitch = zip(ids, first.pitch.asArray(Float.self)).map { id, z in (unvoiced.contains(id) ? 0 : z) * config.pitchStd + config.pitchMean }
         let predictedEnergy = first.energy.asArray(Float.self).map { $0 * config.energyStd + config.energyMean }
         let second = model.forward(trainer.makeBatch([sample(pitch: predictedPitch, energy: predictedEnergy)], dropLabels: false, latent: .posterior, rng: &rng))
         eval(second.mel, second.logDurations)

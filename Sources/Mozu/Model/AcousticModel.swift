@@ -5,6 +5,7 @@ public final class AcousticModel: @unchecked Sendable {
     public let weights: AcousticWeights
     private let encoder: HawkStack
     private let decoder: HawkStack
+    private let vocabulary = PhonemeVocabulary()
 
     public struct Output: Sendable {
         /// [frames][melChannels] 対数 Mel
@@ -119,8 +120,14 @@ public final class AcousticModel: @unchecked Sendable {
         var pitchZ = Self.head(weights.pitchHead, normed, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
         var energyZ = Self.head(weights.energyHead, normed, frames: phoneCount, inDim: d, hidden: cfg.headHiddenDim)
         // 無声化母音など F0 教師の無い音素は損失でマスクされ予測値が定まらないので、学習時の分布（±3σ）に収める
+        // 無声子音と無音は F0 の教師が無く、学習時のデコーダには正規化ピッチ 0 を与えている。推論でも同じにそろえる
+        // （識別器を使った学習では、教師の無い音素の予測値が学習時に無い値へずれることがある）
         var i = 0
         while i < pitchZ.count {
+            let id = phonemeIds[i]
+            if vocabulary.isUnvoicedConsonant(id: id) || id == PhonemeVocabulary.silId || id == PhonemeVocabulary.pauId {
+                pitchZ[i] = 0
+            }
             pitchZ[i] = min(3.0, max(-3.0, pitchZ[i]))
             if pitchShift != 0.0 && 0.0 < cfg.pitchStd {
                 pitchZ[i] += pitchShift / cfg.pitchStd
