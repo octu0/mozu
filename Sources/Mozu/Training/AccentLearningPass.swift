@@ -100,7 +100,8 @@ public enum AccentLearningPass {
                 let initial = initials[pIdx]
                 let isFinal = phrase.pauseAfter || pIdx == phrases.count - 1
                 switch AccentEstimator.estimateKernel(moras: moraSamples, excludeFinalMora: isFinal) {
-                case .kernel(let kernel, let confidence):
+                case .kernel(let estimated, let confidence):
+                    let kernel = ProsodyModel.kernelOffSpecialMora(estimated, moras: phrase.moras)
                     if kernel <= initial.moraCount {
                         learning.record(surface: initial.surface, kernel: kernel, confidence: confidence)
                         votesByWord[initial.surface, default: [:]][kernel, default: 0] += 1

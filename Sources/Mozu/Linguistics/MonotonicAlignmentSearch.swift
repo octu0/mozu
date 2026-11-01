@@ -64,6 +64,33 @@ public final class MonotonicAlignmentSearch: Sendable {
     /// 各音素の安全柵最大許容継続時間フレーム数 (40 フレーム = 400ms)
     public static let standardMaxDuration: Int = 40
 
+    /// ポーズの最大継続時間フレーム数（bestD が UInt8 なので 255 未満）
+    ///
+    /// 話し言葉の間は 0.4 秒を超えることが多い。音素と同じ上限にすると、収まらない無音が前後の母音へ押し込まれる。
+    public static let pauseMaxDuration: Int = 250
+
+    /// 音素の最大継続時間フレーム数
+    static func maxDuration(for phoneme: PhonemeToken, limit: Int) -> Int {
+        return phoneme.category == .pause ? max(limit, pauseMaxDuration) : limit
+    }
+
+    /// 継続時間の事前分布の重み
+    ///
+    /// Mel の適合をフレームの和で数えるので、区間が長いほど適合の項が大きくなる。音素 1 つの平均的な長さ程度を掛けて釣り合わせる
+    /// （これが小さいと、似た音が並ぶ所（母音と長音など）で片方が上限まで伸び、隣が 2 フレームに潰れる）。
+    public static let durationPriorWeight: Float = 10.0
+
+    /// ポーズの継続時間の事前分布の重み
+    ///
+    /// 話し言葉の間は長さのばらつきが大きいので、音素より弱くする（0 にすると、ポーズが前後の話し声を飲み込む）。
+    public static let pauseDurationPriorWeight: Float = 1.0
+
+    /// 継続時間の事前分布によるペナルティ
+    static func durationPenalty(_ d: Float, mean: Float, variance: Float, isPause: Bool) -> Float {
+        let diff = d - mean
+        return -(isPause ? pauseDurationPriorWeight : durationPriorWeight) * (diff * diff) / variance
+    }
+
     /// 各音素の標準的な相対継続時間重み（仮分割用）
     public static func priorWeight(for phoneme: PhonemeToken) -> Float {
         switch phoneme.category {
@@ -91,7 +118,7 @@ public final class MonotonicAlignmentSearch: Sendable {
         }
     }
 
-    /// 発話区間のフレーム総数を制約（安全柵: 母音 2〜40F, 子音 2〜40F）と音素比率により初期仮分割する
+    /// 発話区間のフレーム総数を制約（安全柵: 母音 2〜40F, 子音 2〜40F、ポーズは pauseMaxDuration まで）と音素比率により初期仮分割する
     ///
     /// なぜ手書き固定表ではなく仮分割から開始するか:
     /// 音素ラベルの初期推定区間を教師 WAV の全体長から比例配分で設定し、
@@ -127,7 +154,14 @@ public final class MonotonicAlignmentSearch: Sendable {
             maxPerPhone = standardMaxDuration
         }
 
-        let sumMax = maxPerPhone * n
+        var maxDurs = [Int](repeating: maxPerPhone, count: n)
+        var sumMax = 0
+        var m = 0
+        while m < n {
+            maxDurs[m] = maxDuration(for: phonemes[m], limit: maxPerPhone)
+            sumMax += maxDurs[m]
+            m += 1
+        }
         if sumMax < totalFrames {
             return []
         }
@@ -152,7 +186,7 @@ public final class MonotonicAlignmentSearch: Sendable {
             var activeWeight: Float = 0.0
             var c = 0
             while c < n {
-                if durations[c] < maxPerPhone {
+                if durations[c] < maxDurs[c] {
                     activeWeight += weights[c]
                 }
                 c += 1
@@ -164,9 +198,9 @@ public final class MonotonicAlignmentSearch: Sendable {
             var distributed = 0
             var dIdx = 0
             while dIdx < n && 0 < remaining {
-                if durations[dIdx] < maxPerPhone {
+                if durations[dIdx] < maxDurs[dIdx] {
                     let share = max(1, Int(roundf(Float(remaining) * (weights[dIdx] / activeWeight))))
-                    let space = maxPerPhone - durations[dIdx]
+                    let space = maxDurs[dIdx] - durations[dIdx]
                     let add = min(share, min(space, remaining))
                     if 0 < add {
                         durations[dIdx] += add
@@ -179,7 +213,7 @@ public final class MonotonicAlignmentSearch: Sendable {
             if distributed == 0 {
                 var rIdx = 0
                 while rIdx < n && 0 < remaining {
-                    if durations[rIdx] < maxPerPhone {
+                    if durations[rIdx] < maxDurs[rIdx] {
                         durations[rIdx] += 1
                         remaining -= 1
                     }
@@ -423,9 +457,9 @@ public final class MonotonicAlignmentSearch: Sendable {
         while p < nTotal {
             let md = Self.minDuration(for: phonemes[p])
             minDurs[p] = md
-            maxDurs[p] = maxDurLimit
+            maxDurs[p] = Self.maxDuration(for: phonemes[p], limit: maxDurLimit)
             sumMin += md
-            sumMax += maxDurLimit
+            sumMax += maxDurs[p]
             p += 1
         }
 
@@ -514,6 +548,8 @@ public final class MonotonicAlignmentSearch: Sendable {
         }
 
         // 3. 制約付き単調動的計画法 (Constrained MAS)
+        // 区間の Mel 適合はフレームごとの和で数える。区間の平均にすると、長い区間に別の音が混ざっても点が下がらず、
+        // ポーズが話し声を飲み込んだり、無音が母音に押し込まれたりする。
         // dp[i][k]: 音素 0...i をフレーム 0..<k に割り当てたときの最大対数尤度
         // bestD[i][k]: その最大スコアを達成した音素 i のフレーム数 d
         let negInf: Float = -1.0e18
@@ -532,10 +568,8 @@ public final class MonotonicAlignmentSearch: Sendable {
         while k0 <= k0Max {
             let sumLL = prefLL[0][k0]
             let dFloat = Float(k0)
-            let avgLL = sumLL / dFloat
-            let diff = dFloat - mean0
-            let quadPenalty = -1.0 * (diff * diff) / var0
-            dp[0][k0] = avgLL + quadPenalty
+            let quadPenalty = Self.durationPenalty(dFloat, mean: mean0, variance: var0, isPause: phonemes[0].category == .pause)
+            dp[0][k0] = sumLL + quadPenalty
             bestD[0][k0] = UInt8(k0)
             k0 += 1
         }
@@ -549,6 +583,7 @@ public final class MonotonicAlignmentSearch: Sendable {
             let curStats = durationStats[curPid] ?? Self.defaultDurationStats(for: phonemes[curPh])
             let curVar = max(2.0, curStats.variance)
             let curMean = curStats.mean
+            let curIsPause = phonemes[curPh].category == .pause
 
             var curK = kMin
             while curK <= kMax {
@@ -565,10 +600,8 @@ public final class MonotonicAlignmentSearch: Sendable {
                     if -1.0e17 < prevScore {
                         let sumLL = prefLL[curPh][curK] - prefLL[curPh][prevK]
                         let dFloat = Float(d)
-                        let avgLL = sumLL / dFloat
-                        let diff = dFloat - curMean
-                        let quadPenalty = -1.0 * (diff * diff) / curVar
-                        let segScore = avgLL + quadPenalty
+                        let quadPenalty = Self.durationPenalty(dFloat, mean: curMean, variance: curVar, isPause: curIsPause)
+                        let segScore = sumLL + quadPenalty
                         let totalScore = prevScore + segScore
                         if bestScore < totalScore {
                             bestScore = totalScore
@@ -611,7 +644,7 @@ public final class MonotonicAlignmentSearch: Sendable {
 
         // 5. 厳格受入検証:
         // - 無音以外の 1 フレーム音素は禁止（母音 2 以上 40 以下, 子音 2 以上 40 以下）
-        // - 1 音素が maxDurLimit を超えない
+        // - 1 音素が上限（ポーズ以外は maxDurLimit）を超えない
         // - 総和が tTotal と完全一致
         var sumDurs = 0
         var chkIdx = 0

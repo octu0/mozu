@@ -201,4 +201,42 @@ final class LinguisticTests: XCTestCase {
         let learned = ViterbiMorphology.learnLexiconEntries(sentences: ["明日は遠足行けないから寂しい。"], existing: [])
         XCTAssertFalse(learned.lexicon.contains { $0.surface.hasPrefix("遠足") && $0.surface.count > 2 }, "かなを含む語どうしを連結しない")
     }
+
+    // MARK: - 9. 特殊拍の核と長いポーズ
+
+    /// 核は特殊拍（ー・ン・ッ）に置かず、直前の拍へ移す
+    func testKernelMovesOffSpecialMora() {
+        let kyou = vocabulary.kanaToMoras("きょー")
+        XCTAssertEqual(ProsodyModel.kernelOffSpecialMora(2, moras: kyou), 1)
+        let sensei = vocabulary.kanaToMoras("せんせい")
+        XCTAssertEqual(ProsodyModel.kernelOffSpecialMora(2, moras: sensei), 1)
+        XCTAssertEqual(ProsodyModel.kernelOffSpecialMora(3, moras: sensei), 3)
+        XCTAssertEqual(ProsodyModel.kernelOffSpecialMora(0, moras: kyou), 0)
+        let phrases = prosodyModel.buildAccentPhrases(morphemes: [Morpheme(surface: "今日", reading: "きょー", pos: .noun, accentKernel: 2)], vocabulary: vocabulary)
+        XCTAssertEqual(phrases[0].moras.map { $0.isAccentKernel }, [true, false])
+    }
+
+    /// 0.4 秒を超える間は、前後の母音に押し込まずポーズに割り当てる
+    func testAlignmentKeepsLongPauseOnPauseToken() throws {
+        let a = PhonemeToken(id: 1, symbol: "a", category: .vowel)
+        let pau = PhonemeToken(id: 2, symbol: "<pau>", category: .pause)
+        let i = PhonemeToken(id: 3, symbol: "i", category: .vowel)
+        let dim = AudioConfig.melChannels
+        let aligner = MonotonicAlignmentSearch(
+            prototypes: [
+                1: .init(meanMel: [Float](repeating: 0, count: dim), voiced: 1),
+                2: .init(meanMel: [Float](repeating: -8, count: dim), voiced: 0),
+                3: .init(meanMel: [Float](repeating: 2, count: dim), voiced: 1),
+            ],
+            durationStats: [
+                1: .init(mean: 12, stdDev: 4, variance: 16),
+                2: .init(mean: 20, stdDev: 10, variance: 100),
+                3: .init(mean: 12, stdDev: 4, variance: 16),
+            ]
+        )
+        let mel = [[Float]](repeating: [Float](repeating: 0, count: dim), count: 12) + [[Float]](repeating: [Float](repeating: -8, count: dim), count: 120) + [[Float]](repeating: [Float](repeating: 2, count: dim), count: 12)
+        let voiced = mel.map { $0[0] < -7 ? Float(0) : Float(1) }
+        let durations = try XCTUnwrap(aligner.align(mel: mel, voiced: voiced, phonemes: [a, pau, i]))
+        XCTAssertEqual(durations, [12, 120, 12])
+    }
 }

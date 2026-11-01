@@ -249,7 +249,19 @@ enum TrainCommands {
             }
             let config = AcousticDefaults.config(labelKinds: weights.labels.kinds, modelDim: a.modelDim, encoderLayers: a.encoderLayers, decoderLayers: a.decoderLayers)
             let outURL = URL(fileURLWithPath: out)
-            let result = AcousticTraining.run(samples: samples, labels: weights.labels, initial: weights.acoustic, config: config, options: options, log: { print($0) }) { best, epoch, losses in
+            // 各エポックの重みを <出力>_e<N>.json に残す（採択値ではなく train evaluate で選ぶため）
+            let onEpoch: (AcousticWeights, Int, AcousticLosses) -> Void = { acoustic, epoch, _ in
+                var snapshot = weights
+                snapshot.acoustic = acoustic
+                let path = outURL.deletingPathExtension().path + "_e\(epoch)." + outURL.pathExtension
+                do {
+                    try snapshot.save(to: URL(fileURLWithPath: path))
+                    print("  Epoch \(epoch) の重みを \(path) に保存しました。")
+                } catch {
+                    print("  保存に失敗しました: \(error)")
+                }
+            }
+            let result = AcousticTraining.run(samples: samples, labels: weights.labels, initial: weights.acoustic, config: config, options: options, log: { print($0) }, onEpoch: onEpoch) { best, epoch, losses in
                 weights.acoustic = best
                 do {
                     try weights.save(to: outURL)

@@ -77,6 +77,7 @@ public enum AcousticTraining {
         config: AcousticConfig,
         options: AcousticTrainingOptions,
         log: @escaping (String) -> Void,
+        onEpoch: ((AcousticWeights, Int, AcousticLosses) -> Void)? = nil,
         onBest: (AcousticWeights, Int, AcousticLosses) -> Void
     ) -> AcousticWeights? {
         if samples.isEmpty {
@@ -234,9 +235,11 @@ public enum AcousticTraining {
             if let posterior = validPosterior {
                 log("              検証（参照から推定した z） " + posterior.description)
             }
+            // 採択値は損失の要約にすぎない（GAN の学習では変化比のわずかな差で決まる）ので、各エポックの重みも渡して評価セットで選べるようにする
+            let weights = model.exportWeights(config: effectiveConfig)
+            onEpoch?(weights, epoch, validAverage)
             if selection < bestSelection {
                 bestSelection = selection
-                let weights = model.exportWeights(config: effectiveConfig)
                 best = weights
                 onBest(weights, epoch, validAverage)
             }

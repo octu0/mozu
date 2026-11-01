@@ -72,6 +72,32 @@ public final class ProsodyModel: Sendable {
         return tones
     }
 
+    /// 特殊拍（ー・ン・ッ）に落ちた核を、直前の自立拍へ移す
+    ///
+    /// 核は特殊拍に置かれない。録音の高さから核を推定すると、下降が長音や撥音にまたがるため
+    /// 1 拍遅れて判定されやすい（例: きょ＼う が きょう＼ になる）。推定と合成の両方でこの規則を通す。
+    public static func kernelOffSpecialMora(_ kernel: Int, moras: [MoraToken]) -> Int {
+        var k = min(kernel, moras.count)
+        while 1 < k && isSpecialMora(moras[k - 1]) {
+            k -= 1
+        }
+        return k
+    }
+
+    static func isSpecialMora(_ mora: MoraToken) -> Bool {
+        if mora.phonemes.isEmpty {
+            return false
+        }
+        return mora.phonemes.allSatisfy { p in
+            switch p.category {
+            case .nasalSyllable, .geminate, .prolonged:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
     /// 形態素系列からアクセント句系列を構築する
     ///
     /// 自立語に付属語が連なることで発話句を形成し、
@@ -93,11 +119,12 @@ public final class ProsodyModel: Sendable {
             if m.pos == .symbol {
                 if currentMoras.isEmpty != true {
                     // 現在の句にトーンとアクセント核を適用
-                    let tones = computeMoraTones(moraCount: currentMoras.count, accentKernel: Int(currentKernel))
+                    let kernel = Self.kernelOffSpecialMora(Int(currentKernel), moras: currentMoras)
+                    let tones = computeMoraTones(moraCount: currentMoras.count, accentKernel: kernel)
                     var k = 0
                     while k < currentMoras.count {
                         currentMoras[k].tone = tones[k]
-                        if 0 < currentKernel && (k + 1) == Int(currentKernel) {
+                        if 0 < kernel && (k + 1) == kernel {
                             currentMoras[k].isAccentKernel = true
                         } else {
                             currentMoras[k].isAccentKernel = false
@@ -132,11 +159,12 @@ public final class ProsodyModel: Sendable {
             }
 
             if startsNewPhrase {
-                let tones = computeMoraTones(moraCount: currentMoras.count, accentKernel: Int(currentKernel))
+                let kernel = Self.kernelOffSpecialMora(Int(currentKernel), moras: currentMoras)
+                let tones = computeMoraTones(moraCount: currentMoras.count, accentKernel: kernel)
                 var k = 0
                 while k < currentMoras.count {
                     currentMoras[k].tone = tones[k]
-                    if 0 < currentKernel && (k + 1) == Int(currentKernel) {
+                    if 0 < kernel && (k + 1) == kernel {
                         currentMoras[k].isAccentKernel = true
                     } else {
                         currentMoras[k].isAccentKernel = false
@@ -161,11 +189,12 @@ public final class ProsodyModel: Sendable {
         }
 
         if currentMoras.isEmpty != true {
-            let tones = computeMoraTones(moraCount: currentMoras.count, accentKernel: Int(currentKernel))
+            let kernel = Self.kernelOffSpecialMora(Int(currentKernel), moras: currentMoras)
+            let tones = computeMoraTones(moraCount: currentMoras.count, accentKernel: kernel)
             var k = 0
             while k < currentMoras.count {
                 currentMoras[k].tone = tones[k]
-                if 0 < currentKernel && (k + 1) == Int(currentKernel) {
+                if 0 < kernel && (k + 1) == kernel {
                     currentMoras[k].isAccentKernel = true
                 } else {
                     currentMoras[k].isAccentKernel = false
