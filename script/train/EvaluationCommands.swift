@@ -84,7 +84,10 @@ extension TrainCommands {
                 let lock = NSLock()
                 DispatchQueue.concurrentPerform(iterations: references.count) { i in
                     let s = references[i]
-                    let sequence = engine.sequenceBuilder.build(text: s.text)
+                    // 録音側の音素列には、アライメントで見つかった句読点の無い休止が入っていることがある
+                    guard let sequence = AlignmentBuilder.merge(engine.sequenceBuilder.build(text: s.text), into: s.phonemeIds.map { Int($0) }) else {
+                        return
+                    }
                     let labels = weights.labels.indices(for: utterances[s.id]?.labels ?? [:])
                     // --posterior: 録音から推定した話し方 z を与える（足りないのが話し方の情報かを切り分ける）
                     let latent = a.posterior ? weights.acoustic?.style.map { StyleEncoder(weights: $0).encode(mel: s.mel).mean } : nil

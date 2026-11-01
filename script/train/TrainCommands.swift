@@ -301,9 +301,9 @@ enum TrainCommands {
         var replaced = 0
         let rebuilt = samples.map { sample -> UtteranceSample in
             let sequence = updated.sequenceBuilder.build(text: sample.text)
-            if sequence.ids.map({ Int32($0) }) == sample.phonemeIds {
+            if let merged = AlignmentBuilder.merge(sequence, into: sample.phonemeIds.map { Int($0) }) {
                 replaced += 1
-                return sample.withFeatures(sequence.features)
+                return sample.withFeatures(merged.features)
             }
             return sample
         }

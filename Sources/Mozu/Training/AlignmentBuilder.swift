@@ -27,8 +27,7 @@ public enum AlignmentBuilder {
         var pending: [CorpusUtterance] = []
         var alignments: [String: UtteranceAlignment] = [:]
         for u in corpus.utterances {
-            let body = bodyTokens(sequenceBuilder.build(text: u.text))
-            if let a = cached[u.id], a.phonemes.count == body.count, matches(a, body) {
+            if let a = cached[u.id], matches(a, sequenceBuilder.build(text: u.text)) {
                 alignments[u.id] = a
             } else {
                 pending.append(u)
@@ -83,8 +82,7 @@ public enum AlignmentBuilder {
         let cached = try AlignmentStore.load(from: corpus.alignmentPath)
         var alignments: [String: UtteranceAlignment] = [:]
         for u in corpus.utterances {
-            let body = bodyTokens(sequenceBuilder.build(text: u.text))
-            if let a = cached[u.id], a.phonemes.count == body.count, matches(a, body) {
+            if let a = cached[u.id], matches(a, sequenceBuilder.build(text: u.text)) {
                 alignments[u.id] = a
             }
         }
@@ -104,15 +102,71 @@ public enum AlignmentBuilder {
         return Array(sequence.tokens[1..<(sequence.tokens.count - 1)])
     }
 
-    static func matches(_ alignment: UtteranceAlignment, _ tokens: [PhonemeToken]) -> Bool {
+    static func matches(_ alignment: UtteranceAlignment, _ sequence: PhonemeSequence) -> Bool {
+        let ids = [PhonemeVocabulary.silId] + alignment.phonemes.map { Int($0.phoneId) } + [PhonemeVocabulary.silId]
+        return positions(of: sequence, in: ids) != nil
+    }
+
+    /// テキストから作った音素列の各音素が、アライメントの音素列（MAS が見つけた句読点の無い休止を含む）のどこにあるか
+    ///
+    /// ids: 文頭・文末の無音を含むアライメント側の音素 ID 列。テキスト側に無い音素はポーズだけを許す。合わなければ nil
+    public static func positions(of sequence: PhonemeSequence, in ids: [Int]) -> [Int]? {
+        var result: [Int] = []
+        result.reserveCapacity(sequence.count)
         var i = 0
-        while i < tokens.count {
-            if Int(alignment.phonemes[i].phoneId) != tokens[i].id {
-                return false
+        for token in sequence.tokens {
+            while i < ids.count && ids[i] != token.id && ids[i] == PhonemeVocabulary.pauId {
+                i += 1
             }
+            if ids.count <= i || ids[i] != token.id {
+                return nil
+            }
+            result.append(i)
             i += 1
         }
-        return true
+        return i == ids.count ? result : nil
+    }
+
+    /// テキストから作った音素列に、アライメントで見つかった休止を入れる（休止の特徴は 0）。合わなければ nil
+    public static func merge(_ sequence: PhonemeSequence, into ids: [Int]) -> PhonemeSequence? {
+        guard let map = positions(of: sequence, in: ids) else {
+            return nil
+        }
+        if map.count == ids.count {
+            return sequence
+        }
+        let pause = PhonemeToken(id: PhonemeVocabulary.pauId, symbol: sequence.tokens.first { $0.id == PhonemeVocabulary.pauId }?.symbol ?? "<pau>", category: .pause)
+        var tokens = [PhonemeToken](repeating: pause, count: ids.count)
+        var features = [[Float]](repeating: [Float](repeating: 0.0, count: PhonemeSequenceBuilder.featureCount), count: ids.count)
+        for (k, i) in map.enumerated() {
+            tokens[i] = sequence.tokens[k]
+            features[i] = sequence.features[k]
+        }
+        return PhonemeSequence(tokens: tokens, features: features, phraseStarts: sequence.phraseStarts.map { map[min($0, map.count - 1)] })
+    }
+
+    /// MAS に渡す音素列: 本体に、句読点の無い休止の候補（任意のポーズ）を入れる
+    ///
+    /// 候補は発話の頭（文頭の無音の余白を母音が吸わないように）と、ポーズの無いアクセント句の境目。
+    static func alignmentTokens(_ sequence: PhonemeSequence) -> (tokens: [PhonemeToken], optional: [Bool]) {
+        let body = bodyTokens(sequence)
+        if body.isEmpty {
+            return ([], [])
+        }
+        let pause = PhonemeToken(id: PhonemeVocabulary.pauId, symbol: "<pau>", category: .pause)
+        let starts = Set(sequence.phraseStarts.map { $0 - 1 })
+        var tokens: [PhonemeToken] = []
+        var optional: [Bool] = []
+        for (i, token) in body.enumerated() {
+            let afterPause = 0 < i && body[i - 1].category == .pause
+            if token.category != .pause && (i == 0 || (starts.contains(i) && afterPause != true)) {
+                tokens.append(pause)
+                optional.append(true)
+            }
+            tokens.append(token)
+            optional.append(false)
+        }
+        return (tokens, optional)
     }
 
     /// 発話ごとの Mel・有声フラグ・音素列を並列に用意する
@@ -124,7 +178,7 @@ public enum AlignmentBuilder {
         let lock = NSLock()
         DispatchQueue.concurrentPerform(iterations: utterances.count) { index in
             let u = utterances[index]
-            let tokens = bodyTokens(sequenceBuilder.build(text: u.text))
+            let (tokens, optional) = alignmentTokens(sequenceBuilder.build(text: u.text))
             if tokens.isEmpty {
                 return
             }
@@ -134,7 +188,7 @@ public enum AlignmentBuilder {
             let mel = melExtractor.extractLogMel(pcm: pcm)
             let totalFrames = max(1, mel.count)
             let boundaries = SpeechBoundaries.detect(pcm: pcm, totalFrames: totalFrames)
-            if boundaries.speechFrames < tokens.count * 2 {
+            if boundaries.speechFrames < optional.filter({ $0 != true }).count * 2 {
                 return
             }
             let pitch = tracker.track(pcm: pcm)
@@ -154,7 +208,8 @@ public enum AlignmentBuilder {
                 totalSpeechFrames: speechMel.count,
                 mel: speechMel,
                 voiced: speechVoiced,
-                phonemes: tokens
+                phonemes: tokens,
+                optional: optional
             )
             lock.lock()
             results[index] = item

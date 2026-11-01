@@ -85,6 +85,15 @@ public final class MonotonicAlignmentSearch: Sendable {
     /// 話し言葉の間は長さのばらつきが大きいので、音素より弱くする（0 にすると、ポーズが前後の話し声を飲み込む）。
     public static let pauseDurationPriorWeight: Float = 1.0
 
+    /// 句読点の無い休止（任意のポーズ）の最小フレーム数
+    ///
+    /// 話し言葉では読点の無い所でも息継ぎや間が入る。ポーズ音素が無いと、その無音が前後の音素に押し込まれる。
+    /// 短い無音は語頭の破裂音の閉鎖（無音に近い）なので、それより長いものだけを休止とみなす。
+    public static let optionalPauseMinDuration: Int = 8
+
+    /// 任意のポーズを入れるときの費用（無音でない区間を休止として切り出さないように）
+    public static let optionalPauseCost: Float = 5.0
+
     /// 継続時間の事前分布によるペナルティ
     static func durationPenalty(_ d: Float, mean: Float, variance: Float, isPause: Bool) -> Float {
         let diff = d - mean
@@ -335,6 +344,11 @@ public final class MonotonicAlignmentSearch: Sendable {
             let durs = utt.durations
             var p = 0
             while p < phones.count && p < durs.count {
+                // 0 フレームは使われなかった任意のポーズ
+                if durs[p] == 0 {
+                    p += 1
+                    continue
+                }
                 let pid = phones[p].id
                 let d = Float(durs[p])
                 sumDurs[pid] = (sumDurs[pid] ?? 0.0) + d
@@ -424,10 +438,13 @@ public final class MonotonicAlignmentSearch: Sendable {
         voiced: [Float],
         phonemes: [PhonemeToken],
         meanFramesPerMora: Float = 16.0,
-        maxDurationPerPhoneme: Int? = nil
+        maxDurationPerPhoneme: Int? = nil,
+        optional: [Bool]? = nil
     ) -> [Int]? {
         let tTotal = mel.count
         let nTotal = phonemes.count
+        // 任意のポーズ: 0 フレーム（入れない）か、句頭の休止として最小フレーム数以上（発話の頭は 1 フレームから）
+        let isOptional = optional.map { $0.count == nTotal ? $0 : [Bool](repeating: false, count: nTotal) } ?? [Bool](repeating: false, count: nTotal)
 
         if tTotal <= 0 || nTotal <= 0 {
             return nil
@@ -455,7 +472,7 @@ public final class MonotonicAlignmentSearch: Sendable {
 
         var p = 0
         while p < nTotal {
-            let md = Self.minDuration(for: phonemes[p])
+            let md = isOptional[p] ? 0 : Self.minDuration(for: phonemes[p])
             minDurs[p] = md
             maxDurs[p] = Self.maxDuration(for: phonemes[p], limit: maxDurLimit)
             sumMin += md
@@ -547,6 +564,17 @@ public final class MonotonicAlignmentSearch: Sendable {
             ph += 1
         }
 
+        // 任意のポーズで取れない長さ（1..<最小）と、その区間の点
+        func skips(_ p: Int, _ d: Int) -> Bool {
+            return isOptional[p] && 0 < d && d < (p == 0 ? 1 : Self.optionalPauseMinDuration)
+        }
+        func segmentPenalty(_ p: Int, _ d: Int, mean: Float, variance: Float, isPause: Bool) -> Float {
+            if isOptional[p] {
+                return d == 0 ? 0.0 : -Self.optionalPauseCost
+            }
+            return Self.durationPenalty(Float(d), mean: mean, variance: variance, isPause: isPause)
+        }
+
         // 3. 制約付き単調動的計画法 (Constrained MAS)
         // 区間の Mel 適合はフレームごとの和で数える。区間の平均にすると、長い区間に別の音が混ざっても点が下がらず、
         // ポーズが話し声を飲み込んだり、無音が母音に押し込まれたりする。
@@ -566,9 +594,12 @@ public final class MonotonicAlignmentSearch: Sendable {
 
         var k0 = k0Min
         while k0 <= k0Max {
+            if skips(0, k0) {
+                k0 += 1
+                continue
+            }
             let sumLL = prefLL[0][k0]
-            let dFloat = Float(k0)
-            let quadPenalty = Self.durationPenalty(dFloat, mean: mean0, variance: var0, isPause: phonemes[0].category == .pause)
+            let quadPenalty = segmentPenalty(0, k0, mean: mean0, variance: var0, isPause: phonemes[0].category == .pause)
             dp[0][k0] = sumLL + quadPenalty
             bestD[0][k0] = UInt8(k0)
             k0 += 1
@@ -595,12 +626,15 @@ public final class MonotonicAlignmentSearch: Sendable {
 
                 var d = dMin
                 while d <= dMax {
+                    if skips(curPh, d) {
+                        d += 1
+                        continue
+                    }
                     let prevK = curK - d
                     let prevScore = dp[curPh - 1][prevK]
                     if -1.0e17 < prevScore {
                         let sumLL = prefLL[curPh][curK] - prefLL[curPh][prevK]
-                        let dFloat = Float(d)
-                        let quadPenalty = Self.durationPenalty(dFloat, mean: curMean, variance: curVar, isPause: curIsPause)
+                        let quadPenalty = segmentPenalty(curPh, d, mean: curMean, variance: curVar, isPause: curIsPause)
                         let segScore = sumLL + quadPenalty
                         let totalScore = prevScore + segScore
                         if bestScore < totalScore {
@@ -630,7 +664,7 @@ public final class MonotonicAlignmentSearch: Sendable {
 
         while 0 <= tracePh {
             let d = Int(bestD[tracePh][traceK])
-            if d < minDurs[tracePh] || maxDurs[tracePh] < d {
+            if d < minDurs[tracePh] || maxDurs[tracePh] < d || skips(tracePh, d) {
                 return nil
             }
             durations[tracePh] = d
@@ -676,6 +710,8 @@ public final class MonotonicAlignmentSearch: Sendable {
         public let mel: [[Float]]
         public let voiced: [Float]
         public let phonemes: [PhonemeToken]
+        /// 任意のポーズ（テキストに無く、休止が見つかったときだけ入れる）か。phonemes と同じ長さ
+        public let optional: [Bool]
 
         public init(
             utteranceId: String,
@@ -684,7 +720,8 @@ public final class MonotonicAlignmentSearch: Sendable {
             totalSpeechFrames: Int,
             mel: [[Float]],
             voiced: [Float],
-            phonemes: [PhonemeToken]
+            phonemes: [PhonemeToken],
+            optional: [Bool]? = nil
         ) {
             self.utteranceId = utteranceId
             self.leadSilence = leadSilence
@@ -693,6 +730,21 @@ public final class MonotonicAlignmentSearch: Sendable {
             self.mel = mel
             self.voiced = voiced
             self.phonemes = phonemes
+            self.optional = optional ?? [Bool](repeating: false, count: phonemes.count)
+        }
+
+        /// 初期仮分割（任意のポーズは 0 フレームから始める）
+        func bootstrapDurations() -> [Int] {
+            let kept = phonemes.indices.filter { optional[$0] != true }
+            let durs = MonotonicAlignmentSearch.initialBootstrapDurations(totalFrames: totalSpeechFrames, phonemes: kept.map { phonemes[$0] })
+            if durs.count != kept.count {
+                return []
+            }
+            var full = [Int](repeating: 0, count: phonemes.count)
+            for (k, p) in kept.enumerated() {
+                full[p] = durs[k]
+            }
+            return full
         }
     }
 
@@ -712,10 +764,7 @@ public final class MonotonicAlignmentSearch: Sendable {
         var i = 0
         while i < items.count {
             let item = items[i]
-            let bootstrapDurs = initialBootstrapDurations(
-                totalFrames: item.totalSpeechFrames,
-                phonemes: item.phonemes
-            )
+            let bootstrapDurs = item.bootstrapDurations()
             if bootstrapDurs.count == item.phonemes.count {
                 currentUtterances.append((mel: item.mel, voiced: item.voiced, phonemes: item.phonemes, durations: bootstrapDurs))
             }
@@ -761,7 +810,7 @@ public final class MonotonicAlignmentSearch: Sendable {
     public static func trainAligner(items: [AlignmentInputItem], iterations: Int = 3, meanFramesPerMora: Float = 16.0) -> MonotonicAlignmentSearch {
         var currentUtterances: [(mel: [[Float]], voiced: [Float], phonemes: [PhonemeToken], durations: [Int])] = []
         for item in items {
-            let bootstrapDurs = initialBootstrapDurations(totalFrames: item.totalSpeechFrames, phonemes: item.phonemes)
+            let bootstrapDurs = item.bootstrapDurations()
             if bootstrapDurs.count == item.phonemes.count {
                 currentUtterances.append((mel: item.mel, voiced: item.voiced, phonemes: item.phonemes, durations: bootstrapDurs))
             }
@@ -799,16 +848,22 @@ public final class MonotonicAlignmentSearch: Sendable {
             if let aligned = finalAligned[fIdx] {
                 finalDurs = aligned
             } else {
-                finalDurs = Self.initialBootstrapDurations(totalFrames: item.totalSpeechFrames, phonemes: item.phonemes)
+                finalDurs = item.bootstrapDurations()
             }
             if finalDurs.count == item.phonemes.count {
+                // 任意のポーズは、取られなければ記録しない。発話の頭のものは文頭の無音に含める
                 var phList: [PhonemeAlignment] = []
+                var lead = item.leadSilence
                 var p = 0
                 while p < item.phonemes.count {
-                    phList.append(PhonemeAlignment(symbol: item.phonemes[p].symbol, phoneId: Int32(item.phonemes[p].id), durationFrames: finalDurs[p]))
+                    if item.optional[p] && (finalDurs[p] == 0 || p == 0) {
+                        lead += finalDurs[p]
+                    } else {
+                        phList.append(PhonemeAlignment(symbol: item.phonemes[p].symbol, phoneId: Int32(item.phonemes[p].id), durationFrames: finalDurs[p]))
+                    }
                     p += 1
                 }
-                results.append(UtteranceAlignment(utteranceId: item.utteranceId, leadSilenceFrames: item.leadSilence, trailSilenceFrames: item.trailSilence, totalSpeechFrames: item.totalSpeechFrames, phonemes: phList))
+                results.append(UtteranceAlignment(utteranceId: item.utteranceId, leadSilenceFrames: lead, trailSilenceFrames: item.trailSilence, totalSpeechFrames: item.totalSpeechFrames - (lead - item.leadSilence), phonemes: phList))
             }
             fIdx += 1
         }
@@ -821,7 +876,7 @@ public final class MonotonicAlignmentSearch: Sendable {
         let lock = NSLock()
         DispatchQueue.concurrentPerform(iterations: items.count) { u in
             let item = items[u]
-            let durs = aligner.align(mel: item.mel, voiced: item.voiced, phonemes: item.phonemes, meanFramesPerMora: meanFramesPerMora)
+            let durs = aligner.align(mel: item.mel, voiced: item.voiced, phonemes: item.phonemes, meanFramesPerMora: meanFramesPerMora, optional: item.optional)
             lock.lock()
             results[u] = durs
             lock.unlock()

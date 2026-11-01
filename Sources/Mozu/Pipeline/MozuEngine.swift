@@ -94,15 +94,34 @@ public final class MozuEngine: @unchecked Sendable {
         guard let vocoder = vocoder, let result = synthesizeMel(text: text, voice: voice, speed: speed, pitch: pitch) else {
             return []
         }
-        return Self.limit(vocoder.synthesize(mel: result.output.mel))
+        return vocode(mel: result.output.mel, fadeOutFrames: result.output.durations.last ?? 0)
     }
 
-    /// Mel から波形を作る（コピー合成・診断用）
-    public func vocode(mel: [[Float]]) -> [Float] {
+    /// 文末の無音の区間で波形を 0 まで絞る
+    ///
+    /// 合成した無音は完全な無音ではなく小さな雑音なので、そのまま切れると音声が途中で途切れたように聞こえる。
+    static func fadeOut(_ samples: [Float], frames: Int) -> [Float] {
+        let length = min(samples.count, frames * AudioConfig.hopSize)
+        if length <= 1 {
+            return samples
+        }
+        var out = samples
+        let start = samples.count - length
+        var i = 0
+        while i < length {
+            let x = Float(i) / Float(length - 1)
+            out[start + i] *= 0.5 * (1.0 + cosf(Float.pi * x))
+            i += 1
+        }
+        return out
+    }
+
+    /// Mel から波形を作る。fadeOutFrames: 末尾のこのフレーム数（文末の無音）で波形を絞る
+    public func vocode(mel: [[Float]], fadeOutFrames: Int = 0) -> [Float] {
         guard let vocoder = vocoder else {
             return []
         }
-        return Self.limit(vocoder.synthesize(mel: mel))
+        return Self.limit(Self.fadeOut(vocoder.synthesize(mel: mel), frames: fadeOutFrames))
     }
 
     public func synthesizeWav(text: String, voice: VoiceProfile = .default, speed: Float = 1.0, pitch: Float = 1.0) -> Data {

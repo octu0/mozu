@@ -124,9 +124,9 @@ public enum SampleBuilder {
             guard let alignment = alignments[u.id] else {
                 return
             }
-            let sequence = sequenceBuilder.build(text: u.text)
-            let body = AlignmentBuilder.bodyTokens(sequence)
-            if body.count != alignment.phonemes.count || AlignmentBuilder.matches(alignment, body) != true {
+            // アライメントで見つかった句読点の無い休止も、ポーズ音素として入れる
+            let alignedIds = [PhonemeVocabulary.silId] + alignment.phonemes.map { Int($0.phoneId) } + [PhonemeVocabulary.silId]
+            guard let sequence = AlignmentBuilder.merge(sequenceBuilder.build(text: u.text), into: alignedIds) else {
                 return
             }
             guard let pcm = Corpus.loadPCM(path: u.wavPath, reader: reader) else {
@@ -134,7 +134,7 @@ public enum SampleBuilder {
             }
             let mel = melExtractor.extractLogMel(pcm: pcm)
             let totalFrames = mel.count
-            if totalFrames < body.count * 2 || options.maxFrames < totalFrames {
+            if totalFrames < alignment.phonemes.count * 2 || options.maxFrames < totalFrames {
                 return
             }
             // 継続時間: [先頭無音] + 本体 + [末尾無音]。合計を Mel のフレーム数に合わせる

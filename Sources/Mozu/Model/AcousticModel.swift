@@ -43,7 +43,7 @@ public final class AcousticModel: @unchecked Sendable {
         latent: [Float]? = nil,
         durations: [Int]? = nil,
         maxLeadSilenceFrames: Int = 8,
-        maxTrailSilenceFrames: Int = 12
+        maxTrailSilenceFrames: Int = 25
     ) -> Output {
         let cfg = weights.config
         let d = cfg.modelDim

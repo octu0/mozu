@@ -70,11 +70,12 @@ public enum AccentLearningPass {
             let phrases = builder.prosodyModel.buildAccentPhrases(morphemes: morphemes, vocabulary: builder.vocabulary)
             let initials = phraseInitialMorphemes(morphemes, vocabulary: builder.vocabulary)
             let sequence = builder.build(phrases: phrases)
-            if initials.count != phrases.count || sequence.ids.map({ Int32($0) }) != sample.phonemeIds {
+            // サンプルにはアライメントで見つかった休止が入っていることがあるので、位置を対応づけて読む
+            guard initials.count == phrases.count, let position = AlignmentBuilder.positions(of: sequence, in: sample.phonemeIds.map { Int($0) }) else {
                 report.mismatched += 1
                 continue
             }
-            // 音素列の走査: 先頭の無音の次から
+            // 音素列の走査: 先頭の無音の次から（phone はテキスト側の位置）
             var phone = 1
             var pIdx = 0
             while pIdx < phrases.count {
@@ -84,7 +85,7 @@ public enum AccentLearningPass {
                     let phonemes = mora.phonemes.filter { $0.category != .pause }
                     var vowelIndex = -1
                     for _ in phonemes {
-                        vowelIndex = phone
+                        vowelIndex = position[phone]
                         phone += 1
                     }
                     if 0 <= vowelIndex && vowelIndex < sample.phoneCount && sample.voiced[vowelIndex] {

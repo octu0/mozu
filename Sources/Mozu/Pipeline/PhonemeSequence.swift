@@ -5,6 +5,8 @@ public struct PhonemeSequence: Sendable, Equatable {
     public let tokens: [PhonemeToken]
     /// [phoneCount][PhonemeSequenceBuilder.featureCount]
     public let features: [[Float]]
+    /// アクセント句の先頭の音素の位置（アライメントで、句読点の無い休止を探す候補に使う）
+    public var phraseStarts: [Int] = []
 
     public var ids: [Int] {
         return tokens.map { $0.id }
@@ -49,11 +51,13 @@ public struct PhonemeSequenceBuilder: Sendable {
         let pause = PhonemeToken(id: PhonemeVocabulary.pauId, symbol: vocabulary.token(for: PhonemeVocabulary.pauId), category: .pause)
         tokens.append(silence)
         features.append(zero)
+        var phraseStarts: [Int] = []
         var pIdx = 0
         while pIdx < phrases.count {
             let phrase = phrases[pIdx]
             let moraCount = max(1, phrase.moras.count)
             var mIdx = 0
+            phraseStarts.append(tokens.count)
             for mora in phrase.moras {
                 let feat: [Float] = [
                     mora.tone == .high ? 1.0 : 0.0,
@@ -81,6 +85,6 @@ public struct PhonemeSequenceBuilder: Sendable {
         }
         tokens.append(silence)
         features.append(zero)
-        return PhonemeSequence(tokens: tokens, features: features)
+        return PhonemeSequence(tokens: tokens, features: features, phraseStarts: phraseStarts)
     }
 }

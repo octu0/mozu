@@ -239,4 +239,54 @@ final class LinguisticTests: XCTestCase {
         let durations = try XCTUnwrap(aligner.align(mel: mel, voiced: voiced, phonemes: [a, pau, i]))
         XCTAssertEqual(durations, [12, 120, 12])
     }
+
+    /// 句読点の無い所の間は、任意のポーズとして切り出す（短い無音は破裂音の閉鎖とみなして切り出さない）
+    func testAlignmentInsertsOptionalPauseOnlyForLongSilence() throws {
+        let a = PhonemeToken(id: 1, symbol: "a", category: .vowel)
+        let pau = PhonemeToken(id: 2, symbol: "<pau>", category: .pause)
+        let i = PhonemeToken(id: 3, symbol: "i", category: .vowel)
+        let dim = AudioConfig.melChannels
+        let aligner = MonotonicAlignmentSearch(
+            prototypes: [
+                1: .init(meanMel: [Float](repeating: 0, count: dim), voiced: 1),
+                2: .init(meanMel: [Float](repeating: -8, count: dim), voiced: 0),
+                3: .init(meanMel: [Float](repeating: 2, count: dim), voiced: 1),
+            ],
+            durationStats: [
+                1: .init(mean: 12, stdDev: 4, variance: 16),
+                2: .init(mean: 20, stdDev: 10, variance: 100),
+                3: .init(mean: 12, stdDev: 4, variance: 16),
+            ]
+        )
+        func frames(_ value: Float, _ count: Int) -> [[Float]] {
+            return [[Float]](repeating: [Float](repeating: value, count: dim), count: count)
+        }
+        let phonemes = [pau, a, pau, i]
+        let optional = [true, false, true, false]
+        let mel = frames(-8, 3) + frames(0, 12) + frames(-8, 60) + frames(2, 12)
+        let voiced = mel.map { $0[0] < -7 ? Float(0) : Float(1) }
+        XCTAssertEqual(aligner.align(mel: mel, voiced: voiced, phonemes: phonemes, optional: optional), [3, 12, 60, 12])
+
+        let short = frames(0, 12) + frames(-8, 4) + frames(2, 12)
+        let shortVoiced = short.map { $0[0] < -7 ? Float(0) : Float(1) }
+        let durations = try XCTUnwrap(aligner.align(mel: short, voiced: shortVoiced, phonemes: phonemes, optional: optional))
+        XCTAssertEqual(durations[0], 0)
+        XCTAssertEqual(durations[2], 0, "短い無音は休止にしない")
+        XCTAssertEqual(durations.reduce(0, +), short.count)
+    }
+
+    /// アライメントで見つかった休止を、テキストから作った音素列に入れられる
+    func testMergeInsertsAlignedPause() throws {
+        let builder = PhonemeSequenceBuilder(normalizer: TextNormalizer(), prosodyModel: ProsodyModel(), vocabulary: PhonemeVocabulary())
+        let sequence = builder.build(text: "でも寝ないと")
+        XCTAssertLessThan(1, sequence.phraseStarts.count)
+        var ids = sequence.ids
+        let at = try XCTUnwrap(sequence.phraseStarts.last)
+        ids.insert(PhonemeVocabulary.pauId, at: at)
+        let merged = try XCTUnwrap(AlignmentBuilder.merge(sequence, into: ids))
+        XCTAssertEqual(merged.ids, ids)
+        XCTAssertEqual(merged.features[at], [Float](repeating: 0, count: PhonemeSequenceBuilder.featureCount))
+        XCTAssertEqual(merged.features[at + 1], sequence.features[at])
+        XCTAssertNil(AlignmentBuilder.merge(sequence, into: Array(ids.dropLast(2)) + [PhonemeVocabulary.silId]))
+    }
 }

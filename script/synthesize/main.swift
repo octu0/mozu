@@ -170,7 +170,7 @@ if let input = copyPath {
             }
         }
         if engine.vocoder != nil {
-            samples = engine.vocode(mel: result.output.mel)
+            samples = engine.vocode(mel: result.output.mel, fadeOutFrames: durations.last ?? 0)
         } else {
             print("ボコーダの重みが無いので WAV は書き出しません。")
             exit(0)
